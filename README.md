@@ -121,6 +121,11 @@ maturin develop --release
 pytest tests
 ```
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Every commit needs a DCO sign-off
+(`git commit -s`).
+
 ## License
 
 Apache-2.0
