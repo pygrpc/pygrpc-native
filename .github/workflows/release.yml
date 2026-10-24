@@ -39,7 +39,7 @@ jobs:
           args: --release --locked --out dist
       # The oldest Python the abi3 wheel claims; the x86_64 macOS wheel can't
       # run on the arm64 runner, so it is only built.
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         if: matrix.target != 'x86_64-apple-darwin'
         with:
           python-version: "3.10"
