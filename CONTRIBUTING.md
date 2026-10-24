@@ -57,6 +57,21 @@ commit without it.
 - Address review feedback with new commits on the same branch. PRs are
   squashed on merge, so there is no need to tidy the history.
 
+## What a PR needs to merge
+
+| Check | What it verifies |
+|---|---|
+| **DCO** | every commit has a `Signed-off-by` from its author |
+| **lint** | ruff, ruff-format and codespell (`pre-commit`) |
+| **rust** | rustfmt, clippy and the Rust unit tests |
+| **python** | the Python tests on Linux and macOS, Python 3.10 and 3.13 |
+
+On top of the checks, a PR needs one approving review and every review
+thread resolved. `main` keeps a linear history: PRs are squash-merged with
+the PR title as the commit title, and force pushes and branch deletion are
+blocked. Issues and PRs with no activity for 60 days are marked stale and
+closed 30 days later.
+
 ## Releases
 
 Releases follow semantic versioning. A maintainer bumps the version in
