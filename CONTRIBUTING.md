@@ -47,27 +47,18 @@ commit without it.
 
 ## Pull requests
 
-- **Title**: prefix it with the type of change, and include every prefix
-  that applies: `[Bugfix]`, `[Build]`, `[CI]`, `[Core]`, `[Doc]`, `[Misc]`,
+- Prefix the title with the type of change, every one that applies: `[Bugfix]`, `[Build]`, `[CI]`, `[Core]`, `[Doc]`, `[Misc]`,
   `[Perf]`, `[Test]`. For example, `[Bugfix] Fail a stream cut by close()`.
-- **Description**: fill in the PR template. Say what changed, why, and how
-  you tested it. For performance changes, include the numbers and how you
-  measured them.
+- Fill in the PR template: what changed, why, and how you tested it. For
+  performance changes, include the numbers and how you measured them.
 - Keep a PR to one change. Split unrelated changes into separate PRs.
 - Address review feedback with new commits on the same branch. PRs are
   squashed on merge, so there is no need to tidy the history.
 
 ## What a PR needs to merge
 
-| Check | What it verifies |
-|---|---|
-| **DCO** | every commit has a `Signed-off-by` from its author |
-| **lint** | ruff, ruff-format and codespell (`pre-commit`) |
-| **rust** | rustfmt, clippy and the Rust unit tests |
-| **python** | the Python tests on Linux and macOS, Python 3.10 and 3.13 |
-
-On top of the checks, a PR needs one approving review and every review
-thread resolved. `main` keeps a linear history: PRs are squash-merged with
+The DCO, lint, rust and python checks have to pass, and a PR needs one
+approving review with every review thread resolved. `main` keeps a linear history: PRs are squash-merged with
 the PR title as the commit title, and force pushes and branch deletion are
 blocked. Issues and PRs with no activity for 60 days are marked stale and
 closed 30 days later.
