@@ -1,0 +1,26 @@
+repos:
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: v0.11.7
+  hooks:
+  - id: ruff
+    args: [--fix]
+  - id: ruff-format
+- repo: https://github.com/codespell-project/codespell
+  rev: v2.4.1
+  hooks:
+  - id: codespell
+    exclude: ^Cargo\.lock$
+- repo: local
+  hooks:
+  - id: rust-fmt
+    name: rustfmt
+    entry: cargo fmt --
+    language: system
+    types: [rust]
+    pass_filenames: false
+  - id: rust-clippy
+    name: clippy
+    entry: cargo clippy --locked --all-targets --no-default-features -- -D warnings
+    language: system
+    types: [rust]
+    pass_filenames: false
