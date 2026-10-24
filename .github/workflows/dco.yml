@@ -21,6 +21,10 @@ jobs:
           missing=0
           for sha in $(git rev-list --no-merges "$BASE..$HEAD"); do
             author=$(git log -1 --format='%an <%ae>' "$sha")
+            # Bots such as Dependabot can't certify the DCO; the DCO app skips them too.
+            if [[ "$(git log -1 --format='%an' "$sha")" == *"[bot]" ]]; then
+              continue
+            fi
             if ! git log -1 --format='%B' "$sha" | grep -qiF "Signed-off-by: $author"; then
               echo "::error::$(git log -1 --format='%h %s' "$sha") has no 'Signed-off-by: $author'"
               missing=1
