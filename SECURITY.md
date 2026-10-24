@@ -1,15 +1,13 @@
 # Security Policy
 
-**Please do not report security vulnerabilities through public GitHub issues,
-discussions or pull requests.**
+Please don't report security vulnerabilities in public issues, discussions or
+pull requests.
 
 ## Reporting a vulnerability
 
-Use GitHub's private vulnerability reporting: go to the
-[Security tab](https://github.com/theminjunchoi/pygrpc-native/security) and
-click **Report a vulnerability**. Only the maintainers can see the report.
-
-Please include what you can of:
+Use **Report a vulnerability** on the
+[Security tab](https://github.com/theminjunchoi/pygrpc-native/security), which
+only the maintainers can see. It helps to include:
 
 - the affected version or commit
 - a description of the issue and its impact
@@ -27,9 +25,6 @@ Fixes go into the latest release only. Please upgrade to get them.
 
 ## Scope
 
-pygrpc-native has no TLS or authentication yet, so it is meant for trusted
-networks: bind it to localhost or a private network and restrict the port.
-Reports that rely on exposing it to untrusted clients are still welcome when
-they show something worse than what an unauthenticated gRPC server allows,
-such as memory corruption, a crash, or unbounded memory use from a single
-client.
+pygrpc-native has no TLS or authentication yet, so keep it on localhost or a
+private network. Crashes, memory corruption or unbounded memory use caused by
+a single client are still in scope.
