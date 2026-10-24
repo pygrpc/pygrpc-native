@@ -47,8 +47,9 @@ commit without it.
 
 ## Pull requests
 
-- Prefix the title with the type of change, every one that applies: `[Bugfix]`, `[Build]`, `[CI]`, `[Core]`, `[Doc]`, `[Misc]`,
-  `[Perf]`, `[Test]`. For example, `[Bugfix] Fail a stream cut by close()`.
+- Prefix the title with the type of change, every one that applies:
+  `[Bugfix]`, `[Build]`, `[CI]`, `[Core]`, `[Doc]`, `[Misc]`, `[Perf]`,
+  `[Test]`. For example, `[Bugfix] Fail a stream cut by close()`.
 - Fill in the PR template: what changed, why, and how you tested it. For
   performance changes, include the numbers and how you measured them.
 - Keep a PR to one change. Split unrelated changes into separate PRs.
@@ -58,10 +59,10 @@ commit without it.
 ## What a PR needs to merge
 
 The DCO, lint, rust and python checks have to pass, and a PR needs one
-approving review with every review thread resolved. `main` keeps a linear history: PRs are squash-merged with
-the PR title as the commit title, and force pushes and branch deletion are
-blocked. Issues and PRs with no activity for 60 days are marked stale and
-closed 30 days later.
+approving review with every review thread resolved. `main` keeps a linear
+history: PRs are squash-merged with the PR title as the commit title, and
+force pushes and branch deletion are blocked. Issues and PRs with no activity
+for 60 days are marked stale and closed 30 days later.
 
 ## Releases
 
