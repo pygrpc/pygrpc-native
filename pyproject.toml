@@ -1,0 +1,25 @@
+[build-system]
+requires = ["maturin>=1.8,<2"]
+build-backend = "maturin"
+
+[project]
+name = "pygrpc-native"
+dynamic = ["version"]
+description = "A gRPC server in Rust that hands calls to Python handlers in batches"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+dependencies = []
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+]
+
+[project.urls]
+Repository = "https://github.com/theminjunchoi/pygrpc-native"
+
+[tool.maturin]
+bindings = "pyo3"
+module-name = "pygrpc_native"
