@@ -1,16 +1,9 @@
-"""Echo throughput of grpcio's servers and pygrpc-native, with empty handlers.
+"""Echo benchmark for grpc sync, grpc aio and pygrpc-native.
 
-Every server answers /bench.Echo/Unary with the request bytes. Client
-processes call it in a loop over grpcio for a fixed time, and the script
-prints the calls per second and the client CPU per call, so the server-side
-gain and the client-side cost can be told apart.
+Usage: python benchmarks/echo.py <sync|aio|native> <procs> <threads>
 
-Usage:
-    python benchmarks/echo.py <sync|aio|native> <procs> <threads>
-
-Environment:
-    DUR   seconds to measure (default 5)
-    SIZE  payload bytes (default 64)
+DUR sets the seconds measured (default 5) and SIZE the payload bytes
+(default 64).
 """
 
 import multiprocessing as mp
@@ -90,7 +83,9 @@ def client(port: int, threads: int, out: mp.Queue, ready: mp.Queue) -> None:
             call(PAYLOAD)
             counts[i] += 1
 
-    workers = [threading.Thread(target=work, args=(i,), daemon=True) for i in range(threads)]
+    workers = [
+        threading.Thread(target=work, args=(i,), daemon=True) for i in range(threads)
+    ]
     call(PAYLOAD)
     ready.put(1)
     cpu0, t0 = time.process_time(), time.perf_counter()
@@ -115,10 +110,12 @@ def main() -> None:
     server = ctx.Process(target=serve, args=(kind, port), daemon=True)
     server.start()
     out, ready = ctx.Queue(), ctx.Queue()
-    clients = [ctx.Process(target=client, args=(port, threads, out, ready)) for _ in range(procs)]
+    clients = [
+        ctx.Process(target=client, args=(port, threads, out, ready))
+        for _ in range(procs)
+    ]
     for c in clients:
         c.start()
-    # A client that fails never reports; time out instead of waiting forever.
     for _ in clients:
         ready.get(timeout=60)
     results = [out.get(timeout=DUR + 60) for _ in clients]
@@ -126,7 +123,10 @@ def main() -> None:
     calls = sum(r[0] for r in results)
     rate = sum(r[0] / r[1] for r in results)
     cpu_us = 1e6 * sum(r[2] for r in results) / calls
-    print(f"{kind:7s} {procs}x{threads}: {rate:9,.0f} calls/s  client CPU {cpu_us:6.1f} us/call", flush=True)
+    print(
+        f"{kind:7s} {procs}x{threads}: {rate:9,.0f} calls/s  client CPU {cpu_us:6.1f} us/call",
+        flush=True,
+    )
 
 
 if __name__ == "__main__":

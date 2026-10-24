@@ -1,32 +1,19 @@
 # Benchmarks
 
-## Echo
-
-`echo.py` measures how many calls per second each server answers when the
-handler does nothing, so the number is the cost of the server itself. Every
-server answers `/bench.Echo/Unary` with the request bytes (64 B by default),
-and grpcio client processes call it in a loop.
+`echo.py` starts a server with an empty unary handler and calls it from
+grpcio clients for a few seconds.
 
 ```bash
 pip install grpcio pygrpc-native
-python benchmarks/echo.py sync 8 4     # grpc.server with 64 threads
-python benchmarks/echo.py aio 8 4      # grpc.aio.server
-python benchmarks/echo.py native 8 4   # pygrpc-native, answered on the receiving thread
+python benchmarks/echo.py native 8 4    # sync, aio or native, client processes, threads each
 ```
 
-The arguments are client processes and threads per process. `DUR` sets the
-seconds measured (default 5) and `SIZE` the payload bytes. Server and clients
-run on the same machine, so the busiest configurations also compete for CPU.
+`DUR` (default 5) and `SIZE` (default 64) change the seconds measured and the
+payload bytes. The server and the clients share the machine.
 
-The script also prints the client CPU per call. The clients are grpcio in every
-case, and at 1x1 their cost is about the same whichever server they call:
-pygrpc-native makes the server cheaper, not the client.
+Median of three runs, calls/s with the client CPU per call in brackets.
 
-### Results
-
-Median of three interleaved runs, calls/s (client CPU per call in brackets).
-
-macOS, Apple M4 Pro (14 cores), Python 3.12.13, grpcio 1.84.1, pygrpc-native 0.1.0:
+Apple M4 Pro (14 cores), Python 3.12.13, grpcio 1.84.1, pygrpc-native 0.1.0:
 
 | server | 1x1 | 4x4 | 8x4 |
 |---|---|---|---|
@@ -34,8 +21,8 @@ macOS, Apple M4 Pro (14 cores), Python 3.12.13, grpcio 1.84.1, pygrpc-native 0.1
 | grpc aio | 4,678 (81 us) | 10,431 (106 us) | 10,199 (116 us) |
 | pygrpc-native | 12,596 (76 us) | 50,068 (164 us) | 64,492 (156 us) |
 
-Linux, Modal CPU container (40 vCPUs, gVisor 4.19, so loopback is slow and
-absolute numbers are low), Python 3.12.10, grpcio 1.78.0, pygrpc-native 0.1.0:
+Modal CPU container (40 vCPUs, gVisor), Python 3.12.10, grpcio 1.78.0,
+pygrpc-native 0.1.0:
 
 | server | 1x1 | 4x4 | 8x4 |
 |---|---|---|---|
@@ -43,6 +30,7 @@ absolute numbers are low), Python 3.12.10, grpcio 1.78.0, pygrpc-native 0.1.0:
 | grpc aio | 1,343 (250 us) | 4,274 (316 us) | 4,235 (312 us) |
 | pygrpc-native | 2,294 (208 us) | 16,137 (357 us) | 28,493 (342 us) |
 
-At 4x4 and 8x4 the client CPU per call goes up with pygrpc-native because the
-clients run several times more calls on the same cores, not because a call to
-it costs the client more.
+The clients are grpcio in every row, so at 1x1 they cost about the same
+whichever server they call. With pygrpc-native at 4x4 and 8x4 the clients make
+several times more calls on the same cores, which is why their CPU per call
+goes up.

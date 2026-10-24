@@ -115,10 +115,9 @@ interceptors.
 
 ## Benchmarks
 
-On an echo with an empty handler, pygrpc-native answers about 1.6x as many
-calls per second as grpcio's servers with one client thread, and 4x to 12x
-as many with 16 or 32; see [benchmarks](benchmarks/README.md) for the numbers
-and how to run them.
+With an empty handler, pygrpc-native answers about 1.6x the calls per second
+of grpcio's servers from one client thread, and 4x to 12x from 16 or 32. See
+[benchmarks](benchmarks/README.md).
 
 ## Tests
 
