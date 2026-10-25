@@ -47,7 +47,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build and install
         run: |
-          python -m pip install maturin pytest grpcio
+          python -m pip install maturin pytest grpcio grpcio-tools
           maturin build --release --locked --out dist
           python -m pip install dist/*.whl
       - run: pytest -q tests

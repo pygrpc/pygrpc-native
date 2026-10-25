@@ -14,7 +14,7 @@ You need a Rust toolchain (1.88 or later) and Python 3.10 or later.
 ```bash
 git clone https://github.com/<you>/pygrpc-native && cd pygrpc-native
 python -m venv .venv && source .venv/bin/activate
-pip install maturin pytest grpcio pre-commit
+pip install maturin pytest grpcio grpcio-tools pre-commit
 maturin develop --release
 pre-commit install
 ```
