@@ -63,6 +63,9 @@ struct Running {
 ///         Calls without it also get the peer address.
 ///     call_details: Collect each call's request metadata, peer and deadline
 ///         for ``recv_batch_details``.
+///     delay_stream_headers: Send a stream's response headers with its first
+///         message or ``stream_send_initial_metadata``, as grpcio does,
+///         instead of when the call starts.
 ///
 /// Raises:
 ///     OSError: If the address cannot be bound.
@@ -79,13 +82,21 @@ struct NativeGrpcFront {
 #[pymethods]
 impl NativeGrpcFront {
     #[new]
-    #[pyo3(signature = (target, methods, io_threads=2, client_key_metadata=None, call_details=false))]
+    #[pyo3(signature = (
+        target,
+        methods,
+        io_threads=2,
+        client_key_metadata=None,
+        call_details=false,
+        delay_stream_headers=false,
+    ))]
     fn new(
         target: &str,
         methods: Vec<(String, bool)>,
         io_threads: usize,
         client_key_metadata: Option<String>,
         call_details: bool,
+        delay_stream_headers: bool,
     ) -> PyResult<Self> {
         if io_threads == 0 {
             return Err(PyValueError::new_err("io_threads must be greater than 0"));
@@ -128,6 +139,7 @@ impl NativeGrpcFront {
                 sender,
                 client_key_metadata,
                 call_details,
+                delay_stream_headers,
             )),
             events,
             running: Mutex::new(Some(Running {
@@ -303,7 +315,7 @@ impl NativeGrpcFront {
     /// Blocks, with the GIL released, while the client is not reading (HTTP/2
     /// flow control). Returns False once the client is gone.
     fn stream_send(&self, py: Python<'_>, call_id: u64, payload: PyBackedBytes) -> bool {
-        let Some(sender) = self.shared.stream_sender(call_id) else {
+        let Some(sender) = self.shared.message_sender(call_id) else {
             return false;
         };
         let payload = Bytes::from_owner(payload);
@@ -315,7 +327,7 @@ impl NativeGrpcFront {
     /// Returns STREAM_SENT, STREAM_FULL if the client hasn't read enough yet
     /// (the message is not queued), or STREAM_CLOSED once the client is gone.
     fn stream_try_send(&self, call_id: u64, payload: PyBackedBytes) -> u8 {
-        let Some(sender) = self.shared.stream_sender(call_id) else {
+        let Some(sender) = self.shared.message_sender(call_id) else {
             return STREAM_CLOSED;
         };
         match sender.try_send(Bytes::from_owner(payload)) {
@@ -323,6 +335,20 @@ impl NativeGrpcFront {
             Err(TrySendError::Full(_)) => STREAM_FULL,
             Err(TrySendError::Closed(_)) => STREAM_CLOSED,
         }
+    }
+
+    /// Send a stream's response headers now, with this metadata. Only for a
+    /// server created with ``delay_stream_headers=True``.
+    ///
+    /// Returns False if the headers already went out or the call is gone.
+    fn stream_send_initial_metadata(
+        &self,
+        call_id: u64,
+        metadata: Vec<(String, Bound<'_, PyAny>)>,
+    ) -> PyResult<bool> {
+        Ok(self
+            .shared
+            .send_initial_metadata(call_id, metadata_map(metadata)?))
     }
 
     /// Finish a server-streaming call with an OK status.
