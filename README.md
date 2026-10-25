@@ -64,6 +64,26 @@ remains: a unary handler that calls `send_initial_metadata()` and then fails
 sends the metadata with the status instead of before it, so the client sees
 it as trailing metadata.
 
+`pygrpc_native.aio.server()` does the same for `grpc.aio.server()`:
+
+```python
+import pygrpc_native.aio
+
+server = pygrpc_native.aio.server()
+greeter_pb2_grpc.add_GreeterServicer_to_server(Greeter(), server)
+server.add_insecure_port("[::]:50051")
+await server.start()
+await server.wait_for_termination()
+```
+
+Handlers run on the event loop that called `start()`, uvloop included.
+`abort()` raises `grpc.aio.AbortError`, and a handler whose client cancels or
+whose deadline passes gets `asyncio.CancelledError`, as in grpc.aio. Streams
+can yield from an async generator or call `context.write()`, and handlers
+that aren't coroutines run in `migration_thread_pool`. The fallback,
+the unsupported options and the unary metadata difference are the same as
+for the sync server.
+
 ## Low-level example
 
 ```python
