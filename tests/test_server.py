@@ -410,3 +410,20 @@ def test_frequent_client_pings_are_allowed(pb: tuple[Any, Any]) -> None:
             )
     finally:
         server.stop(None)
+
+
+def test_rejected_call_does_not_hold_up_stop(pb: tuple[Any, Any]) -> None:
+    t_pb2, t_pb2_grpc = pb
+    pool = futures.ThreadPoolExecutor(1)
+    server = pygrpc_native.server(pool)
+    t_pb2_grpc.add_SServicer_to_server(t_pb2_grpc.SServicer(), server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    pool.shutdown()
+    with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+        with pytest.raises(grpc.RpcError) as info:
+            t_pb2_grpc.SStub(channel).Unary(t_pb2.Msg(s="x"), timeout=5)
+    assert cast(grpc.Call, info.value).code() is grpc.StatusCode.INTERNAL
+    start = time.monotonic()
+    assert server.stop(5).wait(10)
+    assert time.monotonic() - start < 1

@@ -57,7 +57,9 @@ server-streaming methods on one insecure port. Interceptors,
 `maximum_concurrent_rpcs`, TLS, response compression and server options other
 than the message size limits and client ping settings raise an error instead
 of being ignored, and so does registering a client-streaming or bidirectional
-method.
+method. One difference remains: a unary handler that calls
+`send_initial_metadata()` and then fails sends the metadata with the status
+instead of before it, so the client sees it as trailing metadata.
 
 ## Low-level example
 
