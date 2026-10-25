@@ -97,7 +97,7 @@ impl NativeGrpcFront {
         call_details=false,
         delay_stream_headers=false,
         bearer_token_sha256=None,
-        unauthenticated_message="Unauthenticated".to_owned(),
+        unauthenticated_message="Unauthenticated",
     ))]
     // Python keyword arguments.
     #[allow(clippy::too_many_arguments)]
@@ -109,7 +109,7 @@ impl NativeGrpcFront {
         call_details: bool,
         delay_stream_headers: bool,
         bearer_token_sha256: Option<Vec<Vec<u8>>>,
-        unauthenticated_message: String,
+        unauthenticated_message: &str,
     ) -> PyResult<Self> {
         if io_threads == 0 {
             return Err(PyValueError::new_err("io_threads must be greater than 0"));
@@ -139,7 +139,7 @@ impl NativeGrpcFront {
                     .map_err(|_| {
                         PyValueError::new_err("bearer_token_sha256 digests must be 32 bytes")
                     })?;
-                Some(BearerAuth::new(digests, unauthenticated_message))
+                Some(BearerAuth::new(digests, unauthenticated_message.to_owned()))
             }
         };
         let os_error = |err: std::io::Error| {
