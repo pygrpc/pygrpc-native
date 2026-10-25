@@ -61,7 +61,6 @@ def test_duplicate_path_is_rejected() -> None:
     try:
         with pytest.raises(ValueError, match="already registered"):
             front.add_methods([("/t.S/A", True)])
-        # Nothing from the failed call was added.
         assert front.add_methods([("/t.S/B", False)]) == [1]
     finally:
         front.close()

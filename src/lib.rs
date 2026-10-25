@@ -152,18 +152,11 @@ impl NativeGrpcFront {
         }
     }
 
-    /// Register more methods before ``start()``.
+    /// Register more ``(path, server_streaming)`` methods before ``start()``
+    /// and return their ids, which follow the ones already registered.
     ///
-    /// Args:
-    ///     methods: ``(path, server_streaming)`` pairs, as for the constructor.
-    ///
-    /// Returns:
-    ///     The method ids of the new methods, which continue after the ones
-    ///     already registered.
-    ///
-    /// Raises:
-    ///     RuntimeError: If the server was already started or closed.
-    ///     ValueError: If a path is already registered.
+    /// Raises RuntimeError after ``start()`` or ``close()``, and ValueError
+    /// for a path that is already registered.
     fn add_methods(&self, methods: Vec<(String, bool)>) -> PyResult<Vec<u32>> {
         if self.running.lock().unwrap().is_none() {
             return Err(PyRuntimeError::new_err("server is closed"));

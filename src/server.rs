@@ -153,8 +153,6 @@ impl Shared {
         }
     }
 
-    /// Appends methods before start(); their ids follow the ones already
-    /// registered.
     pub fn add_methods(&self, methods: Vec<(String, bool)>) -> Result<Vec<u32>, AddMethodsError> {
         let mut pending = self.pending_methods.lock().unwrap();
         if self.methods.get().is_some() {
