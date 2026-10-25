@@ -66,9 +66,16 @@ for 60 days are marked stale and closed 30 days later.
 
 ## Releases
 
-Releases follow semantic versioning. A maintainer bumps the version in
-`Cargo.toml` and pushes a `vX.Y.Z` tag; the release workflow builds the
-wheels and publishes them to PyPI.
+Releases follow semantic versioning. Existing users call the low-level API
+directly, so `tests/test_api.py` pins its names, signatures and event tuples;
+change it only together with a breaking release.
+
+Before a release:
+
+1. Bump the version in `Cargo.toml`.
+2. Build the wheel and run the tests of known downstream projects against it.
+3. Push a `vX.Y.Z` tag. The release workflow builds the wheels and publishes
+   them to PyPI.
 
 ## Reporting security issues
 
