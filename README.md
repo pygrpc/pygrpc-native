@@ -52,14 +52,17 @@ server.wait_for_termination()
 ```
 
 Status codes, error messages, metadata, deadlines, cancellation and
-`ServicerContext` behave as they do in grpcio. It serves unary and
-server-streaming methods on one insecure port. Interceptors,
-`maximum_concurrent_rpcs`, TLS, response compression and server options other
-than the message size limits and client ping settings raise an error instead
-of being ignored, and so does registering a client-streaming or bidirectional
-method. One difference remains: a unary handler that calls
-`send_initial_metadata()` and then fails sends the metadata with the status
-instead of before it, so the client sees it as trailing metadata.
+`ServicerContext` behave as they do in grpcio. Unary and server-streaming
+methods are served natively on one insecure port. Everything else, such as
+client-streaming and bidirectional methods, server reflection or handlers
+added only with `add_generic_rpc_handlers`, is passed to a grpcio server on a
+Unix socket behind it, so it works but doesn't get faster, and `peer()` there
+is the socket. Interceptors, `maximum_concurrent_rpcs`, TLS, response
+compression and server options other than the message size limits and client
+ping settings raise an error instead of being ignored. One difference
+remains: a unary handler that calls `send_initial_metadata()` and then fails
+sends the metadata with the status instead of before it, so the client sees
+it as trailing metadata.
 
 ## Low-level example
 
