@@ -13,7 +13,9 @@ METHODS = [("/t.S/U", False), ("/t.S/S", True)]
 
 
 @contextmanager
-def serving(call_details: bool, block_stream: threading.Event | None = None) -> Iterator[tuple[NativeGrpcFront, list[tuple]]]:
+def serving(
+    call_details: bool, block_stream: threading.Event | None = None
+) -> Iterator[tuple[NativeGrpcFront, list[tuple]]]:
     front = NativeGrpcFront("127.0.0.1:0", METHODS, call_details=call_details)
     front.start()
     events: list[tuple] = []
@@ -41,9 +43,16 @@ def serving(call_details: bool, block_stream: threading.Event | None = None) -> 
 
 
 def test_metadata_peer_and_deadline_match_grpcio() -> None:
-    sent = [("x-a", "1"), ("x-a", "2"), ("x-bin", b"\x00\x01"), ("authorization", "Bearer t")]
+    sent = [
+        ("x-a", "1"),
+        ("x-a", "2"),
+        ("x-bin", b"\x00\x01"),
+        ("authorization", "Bearer t"),
+    ]
     with serving(True) as (front, events):
-        with grpc.insecure_channel(f"127.0.0.1:{front.bound_port}", compression=grpc.Compression.Gzip) as channel:
+        with grpc.insecure_channel(
+            f"127.0.0.1:{front.bound_port}", compression=grpc.Compression.Gzip
+        ) as channel:
             channel.unary_unary("/t.S/U")(b"x", timeout=5, metadata=sent)
     (event,) = events
     assert len(event) == 6
@@ -51,10 +60,17 @@ def test_metadata_peer_and_deadline_match_grpcio() -> None:
     keys = [key for key, _ in metadata]
     assert keys[0] == "user-agent"
     assert list(metadata[1:]) == sent
-    for transport in ("te", "content-type", "grpc-timeout", "grpc-encoding", "grpc-accept-encoding"):
+    for transport in (
+        "te",
+        "content-type",
+        "grpc-timeout",
+        "grpc-encoding",
+        "grpc-accept-encoding",
+    ):
         assert transport not in keys
     assert peer.startswith("ipv4:127.0.0.1:")
-    assert 0 < remaining <= 5
+    # grpc-core rounds the timeout up when it writes the header.
+    assert 4 < remaining < 5.5
 
 
 def test_no_deadline_and_streaming_calls() -> None:
