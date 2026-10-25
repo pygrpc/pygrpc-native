@@ -1,6 +1,10 @@
 """Echo benchmark for grpc sync, grpc aio and pygrpc-native.
 
-Usage: python benchmarks/echo.py <sync|aio|native> <procs> <threads>
+Usage: python benchmarks/echo.py <kind> <procs> <threads>
+
+kind is sync or aio for grpcio, native-sync or native-aio for
+pygrpc_native.server() and pygrpc_native.aio.server(), or native for the
+low-level API.
 
 DUR sets the seconds measured (default 5) and SIZE the payload bytes
 (default 64).
@@ -36,19 +40,23 @@ def serve(kind: str, port: int) -> None:
                 if ev_kind == EVENT_CALL:
                     front.respond(call_id, payload)
         return
-    if kind == "aio":
+    if kind in ("aio", "native-aio"):
         import asyncio
 
         async def main() -> None:
             async def unary(req: bytes, ctx: object) -> bytes:
                 return req
 
-            h = grpc.method_handlers_generic_handler(
+            if kind == "aio":
+                server = grpc.aio.server()
+            else:
+                import pygrpc_native.aio
+
+                server = pygrpc_native.aio.server()
+            server.add_registered_method_handlers(
                 "bench.Echo",
                 {"Unary": grpc.unary_unary_rpc_method_handler(unary, ident, ident)},
             )
-            server = grpc.aio.server()
-            server.add_generic_rpc_handlers((h,))
             server.add_insecure_port(target)
             await server.start()
             await server.wait_for_termination()
@@ -60,12 +68,16 @@ def serve(kind: str, port: int) -> None:
     def unary(req: bytes, ctx: object) -> bytes:
         return req
 
-    handler = grpc.method_handlers_generic_handler(
+    if kind == "sync":
+        server = grpc.server(ThreadPoolExecutor(64))
+    else:
+        import pygrpc_native
+
+        server = pygrpc_native.server(ThreadPoolExecutor(64))
+    server.add_registered_method_handlers(
         "bench.Echo",
         {"Unary": grpc.unary_unary_rpc_method_handler(unary, ident, ident)},
     )
-    server = grpc.server(ThreadPoolExecutor(64))
-    server.add_generic_rpc_handlers((handler,))
     server.add_insecure_port(target)
     server.start()
     server.wait_for_termination()
@@ -124,7 +136,7 @@ def main() -> None:
     rate = sum(r[0] / r[1] for r in results)
     cpu_us = 1e6 * sum(r[2] for r in results) / calls
     print(
-        f"{kind:7s} {procs}x{threads}: {rate:9,.0f} calls/s  client CPU {cpu_us:6.1f} us/call",
+        f"{kind:11s} {procs}x{threads}: {rate:9,.0f} calls/s  client CPU {cpu_us:6.1f} us/call",
         flush=True,
     )
 
