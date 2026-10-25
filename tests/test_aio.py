@@ -415,8 +415,11 @@ def test_context_details(pb: tuple[Any, Any], kind: str) -> None:
 def test_stop_with_grace(pb: tuple[Any, Any], kind: str) -> None:
     a_pb2, a_pb2_grpc = pb
 
+    started: list[str] = []
+
     class Servicer(a_pb2_grpc.SServicer):
         async def Unary(self, request: Any, context: aio.ServicerContext) -> Any:
+            started.append(request.s)
             await asyncio.sleep(float(request.s))
             return request
 
@@ -426,7 +429,8 @@ def test_stop_with_grace(pb: tuple[Any, Any], kind: str) -> None:
             stub = a_pb2_grpc.SStub(channel)
             quick = stub.Unary(a_pb2.Msg(s="0.2"), timeout=10)
             slow = stub.Unary(a_pb2.Msg(s="5"), timeout=10)
-            await asyncio.sleep(0.1)
+            while len(started) < 2:
+                await asyncio.sleep(0.01)
             assert await server.wait_for_termination(0.01) is True
             await server.stop(0.5)
             with pytest.raises(aio.AioRpcError) as info:
