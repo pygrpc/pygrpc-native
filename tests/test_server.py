@@ -347,15 +347,17 @@ def test_lifecycle(pb: tuple[Any, Any]) -> None:
 
 def test_stop_with_grace_finishes_running_calls(pb: tuple[Any, Any]) -> None:
     t_pb2, t_pb2_grpc = pb
+    started = threading.Event()
 
     def slow(request: Any, context: grpc.ServicerContext) -> Any:
+        started.set()
         time.sleep(0.5)
         return request
 
     server, port = _serve(pb, "native", unary=slow)
     with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
         future = t_pb2_grpc.SStub(channel).Unary.future(t_pb2.Msg(s="x"), timeout=10)
-        time.sleep(0.1)
+        assert started.wait(5)
         done = server.stop(5)
         assert future.result().s == "x"
         assert done.wait(5)
