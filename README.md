@@ -68,7 +68,7 @@ pass the serialized reply to `respond`.
 
 ## API
 
-`NativeGrpcFront(target, methods, io_threads=2, client_key_metadata=None)`
+`NativeGrpcFront(target, methods, io_threads=2, client_key_metadata=None, call_details=False)`
 binds `host:port` (every address the host resolves to), `unix:path` or
 `unix:///path`. Port 0 picks a free port. `methods` lists
 `(path, server_streaming)` pairs, where a path is `/package.Service/Method`
@@ -80,6 +80,7 @@ and a method's id is its index in the list.
 | `set_fallback(path)` | forward unknown methods to a grpcio server on a Unix socket |
 | `start()` | start accepting connections |
 | `recv_batch(max_events, timeout_ms=None)` | wait for events with the GIL released; `None` once closed |
+| `recv_batch_details(max_events, timeout_ms=None)` | the same, with call details as a sixth item |
 | `respond(call_id, payload)` | answer a unary call |
 | `fail(call_id, code, message)` | end any call with a non-OK status, without blocking |
 | `stream_send(call_id, payload)` | send one streamed message; blocks while the client is not reading |
@@ -93,6 +94,13 @@ client left a stream before it ended (`payload` and `client_key` are then
 `None`). `client_key` is the value of the `client_key_metadata` request
 metadata when it is set and present, and the peer address otherwise, so
 calls from the same client can be routed to the same worker.
+
+With `call_details=True`, `recv_batch_details` adds
+`(metadata, peer, time_remaining)` to each call, matching grpcio's
+`invocation_metadata()`, `peer()` and `time_remaining()`: the request metadata
+in order without the transport headers, with `-bin` values as bytes, the peer
+as `ipv4:host:port`, and the seconds left before the deadline or `None`.
+Without it the sixth item is `None`, and nothing extra is collected per call.
 
 `set_fallback` lets one port serve methods you don't list: run a regular
 `grpc.Server` on a Unix socket and its methods are proxied there, with its

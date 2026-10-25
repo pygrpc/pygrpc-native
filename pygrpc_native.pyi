@@ -8,6 +8,12 @@ EVENT_CANCEL: int
 # None for EVENT_CANCEL.
 Event = tuple[int, int, int, bytes | None, bytes | str | None]
 
+# (metadata, peer, time_remaining); metadata values are bytes for -bin keys.
+CallDetails = tuple[tuple[tuple[str, str | bytes], ...], str, float | None]
+DetailedEvent = tuple[
+    int, int, int, bytes | None, bytes | str | None, CallDetails | None
+]
+
 class NativeGrpcFront:
     def __init__(
         self,
@@ -15,6 +21,7 @@ class NativeGrpcFront:
         methods: Sequence[tuple[str, bool]],
         io_threads: int = 2,
         client_key_metadata: str | None = None,
+        call_details: bool = False,
     ) -> None: ...
     @property
     def bound_port(self) -> int: ...
@@ -23,6 +30,9 @@ class NativeGrpcFront:
     def recv_batch(
         self, max_events: int, timeout_ms: int | None = None
     ) -> list[Event] | None: ...
+    def recv_batch_details(
+        self, max_events: int, timeout_ms: int | None = None
+    ) -> list[DetailedEvent] | None: ...
     def respond(self, call_id: int, payload: bytes) -> bool: ...
     def fail(self, call_id: int, code: int, message: str) -> bool: ...
     def stream_send(self, call_id: int, payload: bytes) -> bool: ...

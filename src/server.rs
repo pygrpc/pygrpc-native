@@ -54,12 +54,27 @@ pub enum ClientKey {
     Peer(Arc<str>),
 }
 
+/// A request metadata value: text, or the decoded bytes of a `-bin` key.
+pub enum MetadataValue {
+    Ascii(Bytes),
+    Binary(Bytes),
+}
+
+/// What a call carries besides its payload, collected only when the server
+/// is created with `call_details`.
+pub struct CallDetails {
+    pub metadata: Vec<(String, MetadataValue)>,
+    pub peer: Arc<str>,
+    pub deadline: Option<tokio::time::Instant>,
+}
+
 pub enum Event {
     Call {
         call_id: u64,
         method_id: u32,
         payload: Bytes,
         client_key: ClientKey,
+        details: Option<Box<CallDetails>>,
     },
     /// The client went away before a server-streaming call finished.
     Cancel {
@@ -105,6 +120,7 @@ pub struct Shared {
     connections_done: Notify,
     fallback: OnceLock<PathBuf>,
     client_key_metadata: Option<String>,
+    call_details: bool,
 }
 
 impl Shared {
@@ -112,6 +128,7 @@ impl Shared {
         methods: Vec<(String, bool)>,
         events: crossbeam_channel::Sender<Event>,
         client_key_metadata: Option<String>,
+        call_details: bool,
     ) -> Self {
         let methods = methods
             .into_iter()
@@ -129,6 +146,7 @@ impl Shared {
             connections_done: Notify::new(),
             fallback: OnceLock::new(),
             client_key_metadata,
+            call_details,
         }
     }
 
@@ -356,6 +374,47 @@ fn client_key(
     }
 }
 
+// Transport headers grpcio leaves out of invocation_metadata().
+const TRANSPORT_HEADERS: [&str; 5] = [
+    "te",
+    "content-type",
+    "grpc-timeout",
+    "grpc-encoding",
+    "grpc-accept-encoding",
+];
+
+fn call_details(
+    shared: &Shared,
+    metadata: &tonic::metadata::MetadataMap,
+    peer: &Arc<str>,
+    deadline: Option<tokio::time::Instant>,
+) -> Option<Box<CallDetails>> {
+    if !shared.call_details {
+        return None;
+    }
+    let metadata = metadata
+        .iter()
+        .filter_map(|entry| match entry {
+            tonic::metadata::KeyAndValueRef::Ascii(key, value) => {
+                if TRANSPORT_HEADERS.contains(&key.as_str()) {
+                    return None;
+                }
+                let value = Bytes::copy_from_slice(value.as_encoded_bytes());
+                Some((key.as_str().to_owned(), MetadataValue::Ascii(value)))
+            }
+            tonic::metadata::KeyAndValueRef::Binary(key, value) => {
+                let value = value.to_bytes().ok()?;
+                Some((key.as_str().to_owned(), MetadataValue::Binary(value)))
+            }
+        })
+        .collect();
+    Some(Box::new(CallDetails {
+        metadata,
+        peer: peer.clone(),
+        deadline,
+    }))
+}
+
 /// Removes a unary call from the table if its future is dropped first.
 struct UnaryGuard {
     shared: Arc<Shared>,
@@ -373,6 +432,7 @@ struct UnaryCall {
     shared: Arc<Shared>,
     method_id: u32,
     peer: Arc<str>,
+    deadline: Option<tokio::time::Instant>,
 }
 
 impl UnaryService<Bytes> for UnaryCall {
@@ -387,6 +447,7 @@ impl UnaryService<Bytes> for UnaryCall {
             shared.client_key_metadata.as_deref(),
             &self.peer,
         );
+        let details = call_details(&shared, request.metadata(), &self.peer, self.deadline);
         Box::pin(async move {
             let call_id = shared.next_call_id();
             let (sender, receiver) = oneshot::channel();
@@ -403,6 +464,7 @@ impl UnaryService<Bytes> for UnaryCall {
                 method_id,
                 payload: request.into_inner(),
                 client_key,
+                details,
             };
             if shared.events.send(event).is_err() {
                 return Err(shutting_down());
@@ -494,6 +556,7 @@ impl ServerStreamingService<Bytes> for StreamingCall {
             shared.client_key_metadata.as_deref(),
             &self.peer,
         );
+        let details = call_details(&shared, request.metadata(), &self.peer, self.deadline);
         let deadline = self
             .deadline
             .map(|deadline| Box::pin(tokio::time::sleep_until(deadline)));
@@ -522,6 +585,7 @@ impl ServerStreamingService<Bytes> for StreamingCall {
                 method_id,
                 payload: request.into_inner(),
                 client_key,
+                details,
             };
             if shared.events.send(event).is_err() {
                 return Err(shutting_down());
@@ -568,6 +632,7 @@ async fn route(
                 shared,
                 method_id,
                 peer,
+                deadline,
             };
             grpc().unary(call, request).await
         }

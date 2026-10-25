@@ -26,7 +26,10 @@ use tokio::runtime::Runtime;
 use tokio::sync::watch;
 use tonic::{Code, Status};
 
-use server::{accept_loop, ClientKey, Event, Listener, Shared, CONNECTION_DRAIN_TIMEOUT};
+use server::{
+    accept_loop, CallDetails, ClientKey, Event, Listener, MetadataValue, Shared,
+    CONNECTION_DRAIN_TIMEOUT,
+};
 
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -51,6 +54,8 @@ struct Running {
 ///     client_key_metadata: Request metadata key whose value is passed to
 ///         Python as the client key, or None to always pass the peer address.
 ///         Calls without it also get the peer address.
+///     call_details: Collect each call's request metadata, peer and deadline
+///         for ``recv_batch_details``.
 ///
 /// Raises:
 ///     OSError: If the address cannot be bound.
@@ -67,12 +72,13 @@ struct NativeGrpcFront {
 #[pymethods]
 impl NativeGrpcFront {
     #[new]
-    #[pyo3(signature = (target, methods, io_threads=2, client_key_metadata=None))]
+    #[pyo3(signature = (target, methods, io_threads=2, client_key_metadata=None, call_details=false))]
     fn new(
         target: &str,
         methods: Vec<(String, bool)>,
         io_threads: usize,
         client_key_metadata: Option<String>,
+        call_details: bool,
     ) -> PyResult<Self> {
         if io_threads == 0 {
             return Err(PyValueError::new_err("io_threads must be greater than 0"));
@@ -110,7 +116,12 @@ impl NativeGrpcFront {
         let (sender, events) = crossbeam_channel::unbounded();
         let (shutdown, _) = watch::channel(false);
         Ok(NativeGrpcFront {
-            shared: Arc::new(Shared::new(methods, sender, client_key_metadata)),
+            shared: Arc::new(Shared::new(
+                methods,
+                sender,
+                client_key_metadata,
+                call_details,
+            )),
             events,
             running: Mutex::new(Some(Running {
                 runtime,
@@ -179,44 +190,24 @@ impl NativeGrpcFront {
         max_events: usize,
         timeout_ms: Option<u64>,
     ) -> PyResult<Option<Bound<'py, PyList>>> {
-        if max_events == 0 {
-            return Err(PyValueError::new_err("max_events must be greater than 0"));
-        }
-        let (batch, closed) = py.detach(|| {
-            let mut batch = Vec::new();
-            // The close event may have been taken with the previous batch.
-            if self.shared.is_closed() && self.events.is_empty() {
-                return (batch, true);
-            }
-            let first = match timeout_ms {
-                Some(ms) => self.events.recv_timeout(Duration::from_millis(ms)),
-                None => self
-                    .events
-                    .recv()
-                    .map_err(|_| RecvTimeoutError::Disconnected),
-            };
-            match first {
-                Ok(Event::Closed) | Err(RecvTimeoutError::Disconnected) => return (batch, true),
-                Ok(event) => batch.push(event),
-                Err(RecvTimeoutError::Timeout) => return (batch, false),
-            }
-            while batch.len() < max_events {
-                match self.events.try_recv() {
-                    Ok(Event::Closed) => return (batch, true),
-                    Ok(event) => batch.push(event),
-                    Err(_) => break,
-                }
-            }
-            (batch, false)
-        });
-        if closed && batch.is_empty() {
-            return Ok(None);
-        }
-        let items = PyList::empty(py);
-        for event in batch {
-            items.append(event_tuple(py, event)?)?;
-        }
-        Ok(Some(items))
+        self.recv(py, max_events, timeout_ms, event_tuple)
+    }
+
+    /// Like ``recv_batch``, with a sixth item on every event:
+    /// ``(metadata, peer, time_remaining)`` for a call made on a server
+    /// created with ``call_details=True``, and None otherwise. metadata is a
+    /// tuple of ``(key, value)`` pairs in the order received, without the
+    /// transport headers, where value is bytes for ``-bin`` keys and str
+    /// otherwise. time_remaining is the seconds left before the deadline, or
+    /// None without one.
+    #[pyo3(signature = (max_events, timeout_ms=None))]
+    fn recv_batch_details<'py>(
+        &self,
+        py: Python<'py>,
+        max_events: usize,
+        timeout_ms: Option<u64>,
+    ) -> PyResult<Option<Bound<'py, PyList>>> {
+        self.recv(py, max_events, timeout_ms, event_details_tuple)
     }
 
     /// Send the serialized response of a unary call.
@@ -309,6 +300,55 @@ impl Drop for NativeGrpcFront {
     }
 }
 
+impl NativeGrpcFront {
+    fn recv<'py>(
+        &self,
+        py: Python<'py>,
+        max_events: usize,
+        timeout_ms: Option<u64>,
+        convert: fn(Python<'py>, Event) -> PyResult<Bound<'py, PyTuple>>,
+    ) -> PyResult<Option<Bound<'py, PyList>>> {
+        if max_events == 0 {
+            return Err(PyValueError::new_err("max_events must be greater than 0"));
+        }
+        let (batch, closed) = py.detach(|| {
+            let mut batch = Vec::new();
+            // The close event may have been taken with the previous batch.
+            if self.shared.is_closed() && self.events.is_empty() {
+                return (batch, true);
+            }
+            let first = match timeout_ms {
+                Some(ms) => self.events.recv_timeout(Duration::from_millis(ms)),
+                None => self
+                    .events
+                    .recv()
+                    .map_err(|_| RecvTimeoutError::Disconnected),
+            };
+            match first {
+                Ok(Event::Closed) | Err(RecvTimeoutError::Disconnected) => return (batch, true),
+                Ok(event) => batch.push(event),
+                Err(RecvTimeoutError::Timeout) => return (batch, false),
+            }
+            while batch.len() < max_events {
+                match self.events.try_recv() {
+                    Ok(Event::Closed) => return (batch, true),
+                    Ok(event) => batch.push(event),
+                    Err(_) => break,
+                }
+            }
+            (batch, false)
+        });
+        if closed && batch.is_empty() {
+            return Ok(None);
+        }
+        let items = PyList::empty(py);
+        for event in batch {
+            items.append(convert(py, event)?)?;
+        }
+        Ok(Some(items))
+    }
+}
+
 fn event_tuple<'py>(py: Python<'py>, event: Event) -> PyResult<Bound<'py, PyTuple>> {
     match event {
         Event::Call {
@@ -316,6 +356,7 @@ fn event_tuple<'py>(py: Python<'py>, event: Event) -> PyResult<Bound<'py, PyTupl
             method_id,
             payload,
             client_key,
+            ..
         } => {
             let key: Bound<'py, PyAny> = match client_key {
                 ClientKey::Id(id) => PyBytes::new(py, &id).into_any(),
@@ -335,6 +376,44 @@ fn event_tuple<'py>(py: Python<'py>, event: Event) -> PyResult<Bound<'py, PyTupl
         }
         Event::Closed => Err(PyRuntimeError::new_err("unexpected close event")),
     }
+}
+
+fn event_details_tuple<'py>(py: Python<'py>, event: Event) -> PyResult<Bound<'py, PyTuple>> {
+    let details = match &event {
+        Event::Call {
+            details: Some(details),
+            ..
+        } => details_tuple(py, details)?.into_any(),
+        _ => py.None().into_bound(py),
+    };
+    let base = event_tuple(py, event)?;
+    let mut items: Vec<Bound<'py, PyAny>> = base.iter().collect();
+    items.push(details);
+    PyTuple::new(py, items)
+}
+
+fn details_tuple<'py>(py: Python<'py>, details: &CallDetails) -> PyResult<Bound<'py, PyTuple>> {
+    let mut metadata = Vec::with_capacity(details.metadata.len());
+    for (key, value) in &details.metadata {
+        let value: Bound<'py, PyAny> = match value {
+            MetadataValue::Ascii(text) => {
+                String::from_utf8_lossy(text).into_pyobject(py)?.into_any()
+            }
+            MetadataValue::Binary(bytes) => PyBytes::new(py, bytes).into_any(),
+        };
+        metadata.push((key.as_str(), value).into_pyobject(py)?);
+    }
+    let remaining = details.deadline.map(|deadline| {
+        deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            .as_secs_f64()
+    });
+    (
+        PyTuple::new(py, metadata)?,
+        details.peer.as_ref(),
+        remaining,
+    )
+        .into_pyobject(py)
 }
 
 enum StdListener {
