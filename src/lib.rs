@@ -23,6 +23,7 @@ use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedBytes;
 use pyo3::types::{PyBytes, PyList, PyTuple};
 use tokio::runtime::Runtime;
+use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::watch;
 use tonic::{Code, Status};
 
@@ -35,6 +36,9 @@ const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 const EVENT_CALL: u8 = 0;
 const EVENT_CANCEL: u8 = 1;
+const STREAM_SENT: u8 = 0;
+const STREAM_FULL: u8 = 1;
+const STREAM_CLOSED: u8 = 2;
 
 struct Running {
     runtime: Runtime,
@@ -265,6 +269,21 @@ impl NativeGrpcFront {
         };
         let payload = Bytes::from_owner(payload);
         py.detach(|| sender.blocking_send(payload).is_ok())
+    }
+
+    /// ``stream_send`` without blocking, for callers on an event loop.
+    ///
+    /// Returns STREAM_SENT, STREAM_FULL if the client hasn't read enough yet
+    /// (the message is not queued), or STREAM_CLOSED once the client is gone.
+    fn stream_try_send(&self, call_id: u64, payload: PyBackedBytes) -> u8 {
+        let Some(sender) = self.shared.stream_sender(call_id) else {
+            return STREAM_CLOSED;
+        };
+        match sender.try_send(Bytes::from_owner(payload)) {
+            Ok(()) => STREAM_SENT,
+            Err(TrySendError::Full(_)) => STREAM_FULL,
+            Err(TrySendError::Closed(_)) => STREAM_CLOSED,
+        }
     }
 
     /// Finish a server-streaming call with an OK status.
@@ -524,6 +543,9 @@ fn pygrpc_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<NativeGrpcFront>()?;
     m.add("EVENT_CALL", EVENT_CALL)?;
     m.add("EVENT_CANCEL", EVENT_CANCEL)?;
+    m.add("STREAM_SENT", STREAM_SENT)?;
+    m.add("STREAM_FULL", STREAM_FULL)?;
+    m.add("STREAM_CLOSED", STREAM_CLOSED)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
 }
