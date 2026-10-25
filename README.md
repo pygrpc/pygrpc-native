@@ -86,6 +86,7 @@ before `start()`, so the port can be bound before the methods are known.
 | `respond(call_id, payload)` | answer a unary call |
 | `fail(call_id, code, message)` | end any call with a non-OK status, without blocking |
 | `stream_send(call_id, payload)` | send one streamed message; blocks while the client is not reading |
+| `stream_try_send(call_id, payload)` | the same without blocking: `STREAM_SENT`, `STREAM_FULL` (not queued) or `STREAM_CLOSED` |
 | `stream_end(call_id)` | finish a stream with OK; a stream cut short by `close()` ends with UNAVAILABLE |
 | `stream_open(call_id)` | whether the client is still reading a stream |
 | `close()` | stop without waiting for calls in flight; their clients get UNAVAILABLE |
