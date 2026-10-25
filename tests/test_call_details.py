@@ -1,6 +1,7 @@
 """recv_batch_details reports what grpcio's ServicerContext would."""
 
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -117,3 +118,51 @@ def test_recv_batch_keeps_five_items_with_details_on() -> None:
             assert future.result() == b"x"
     finally:
         front.close()
+
+
+def _wait_for(front: NativeGrpcFront, kind: int, wait: float = 5.0) -> tuple | None:
+    deadline = time.monotonic() + wait
+    while time.monotonic() < deadline:
+        for event in front.recv_batch_details(16, 100) or []:
+            if event[0] == kind:
+                return event
+    return None
+
+
+@pytest.mark.parametrize("how", ["cancel", "deadline"])
+def test_unanswered_unary_call_reports_a_cancel(how: str) -> None:
+    front = NativeGrpcFront("127.0.0.1:0", METHODS, call_details=True)
+    front.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{front.bound_port}") as channel:
+            timeout = 0.3 if how == "deadline" else 10
+            future = channel.unary_unary("/t.S/U").future(b"x", timeout=timeout)
+            call = _wait_for(front, EVENT_CALL)
+            assert call is not None
+            if how == "cancel":
+                future.cancel()
+            cancel = _wait_for(front, EVENT_CANCEL)
+            assert cancel is not None and cancel[1] == call[1]
+            assert front.respond(call[1], b"late") is False
+    finally:
+        front.close()
+
+
+def test_answered_or_details_off_unary_calls_report_no_cancel() -> None:
+    for details in (True, False):
+        front = NativeGrpcFront("127.0.0.1:0", METHODS, call_details=details)
+        front.start()
+        try:
+            with grpc.insecure_channel(f"127.0.0.1:{front.bound_port}") as channel:
+                answered = channel.unary_unary("/t.S/U").future(b"x", timeout=10)
+                call = _wait_for(front, EVENT_CALL)
+                assert call is not None
+                front.respond(call[1], b"ok")
+                assert answered.result() == b"ok"
+                if not details:
+                    cancelled = channel.unary_unary("/t.S/U").future(b"x", timeout=10)
+                    assert _wait_for(front, EVENT_CALL) is not None
+                    cancelled.cancel()
+                assert _wait_for(front, EVENT_CANCEL, wait=0.5) is None
+        finally:
+            front.close()
