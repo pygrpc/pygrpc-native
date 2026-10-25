@@ -31,8 +31,8 @@ use tonic::metadata::{
 use tonic::{Code, Status};
 
 use server::{
-    accept_loop, AddMethodsError, Answer, CallDetails, ClientKey, Event, Listener, MetadataValue,
-    Shared, CONNECTION_DRAIN_TIMEOUT,
+    accept_loop, AddMethodsError, Answer, BearerAuth, CallDetails, ClientKey, Event, Listener,
+    MetadataValue, Shared, CONNECTION_DRAIN_TIMEOUT,
 };
 
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -67,10 +67,16 @@ struct Running {
 ///     delay_stream_headers: Send a stream's response headers with its first
 ///         message or ``stream_send_initial_metadata``, as grpcio does,
 ///         instead of when the call starts.
+///     bearer_token_sha256: SHA-256 digests of the accepted bearer tokens.
+///         When set, a call without ``authorization: Bearer <token>`` for
+///         one of them ends with UNAUTHENTICATED before it reaches Python or
+///         the fallback.
+///     unauthenticated_message: The status message of those calls.
 ///
 /// Raises:
 ///     OSError: If the address cannot be bound.
-///     ValueError: If ``client_key_metadata`` is not a valid metadata key.
+///     ValueError: If ``client_key_metadata`` is not a valid metadata key, or
+///         ``bearer_token_sha256`` is empty or has a digest that isn't 32 bytes.
 #[pyclass(module = "pygrpc_native", frozen)]
 struct NativeGrpcFront {
     shared: Arc<Shared>,
@@ -90,7 +96,11 @@ impl NativeGrpcFront {
         client_key_metadata=None,
         call_details=false,
         delay_stream_headers=false,
+        bearer_token_sha256=None,
+        unauthenticated_message="Unauthenticated".to_owned(),
     ))]
+    // Python keyword arguments.
+    #[allow(clippy::too_many_arguments)]
     fn new(
         target: &str,
         methods: Vec<(String, bool)>,
@@ -98,6 +108,8 @@ impl NativeGrpcFront {
         client_key_metadata: Option<String>,
         call_details: bool,
         delay_stream_headers: bool,
+        bearer_token_sha256: Option<Vec<Vec<u8>>>,
+        unauthenticated_message: String,
     ) -> PyResult<Self> {
         if io_threads == 0 {
             return Err(PyValueError::new_err("io_threads must be greater than 0"));
@@ -112,6 +124,24 @@ impl NativeGrpcFront {
                 )));
             }
         }
+        let bearer_auth = match bearer_token_sha256 {
+            None => None,
+            Some(digests) if digests.is_empty() => {
+                return Err(PyValueError::new_err(
+                    "bearer_token_sha256 must not be empty; pass None to accept every call",
+                ));
+            }
+            Some(digests) => {
+                let digests = digests
+                    .into_iter()
+                    .map(|digest| <[u8; 32]>::try_from(digest.as_slice()))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|_| {
+                        PyValueError::new_err("bearer_token_sha256 digests must be 32 bytes")
+                    })?;
+                Some(BearerAuth::new(digests, unauthenticated_message))
+            }
+        };
         let os_error = |err: std::io::Error| {
             PyOSError::new_err((err.raw_os_error().unwrap_or(0), format!("{target}: {err}")))
         };
@@ -141,6 +171,7 @@ impl NativeGrpcFront {
                 client_key_metadata,
                 call_details,
                 delay_stream_headers,
+                bearer_auth,
             )),
             events,
             running: Mutex::new(Some(Running {
