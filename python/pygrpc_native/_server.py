@@ -236,7 +236,62 @@ class _Context(grpc.ServicerContext):
         pass
 
 
-class Server(grpc.Server):
+class _Codec:
+    """Request decoding and response encoding with grpcio's limits and errors."""
+
+    _front: NativeGrpcFront | None
+    _receive_limit: int | None
+    _send_limit: int | None
+
+    def _request(self, call: Any, payload: bytes) -> tuple[bool, Any]:
+        front = self._front
+        assert front is not None
+        if self._receive_limit is not None and len(payload) > self._receive_limit:
+            front.fail(
+                call.call_id,
+                _code(grpc.StatusCode.RESOURCE_EXHAUSTED),
+                f"SERVER: Received message larger than max ({len(payload)} vs. {self._receive_limit})",
+            )
+            return False, None
+        deserializer = call.handler.request_deserializer
+        try:
+            return True, payload if deserializer is None else deserializer(payload)
+        except Exception:
+            _LOGGER.exception("Exception deserializing request!")
+            front.fail(
+                call.call_id,
+                _code(grpc.StatusCode.INTERNAL),
+                "Exception deserializing request!",
+            )
+            return False, None
+
+    def _serialize(self, call: Any, response: Any) -> bytes | None:
+        front = self._front
+        assert front is not None
+        serializer = call.handler.response_serializer
+        try:
+            data = response if serializer is None else serializer(response)
+            if not isinstance(data, bytes):
+                raise TypeError(f"expected bytes, got {type(data).__name__}")
+        except Exception:
+            _LOGGER.exception("Failed to serialize response!")
+            front.fail(
+                call.call_id,
+                _code(grpc.StatusCode.INTERNAL),
+                "Failed to serialize response!",
+            )
+            return None
+        if self._send_limit is not None and len(data) > self._send_limit:
+            front.fail(
+                call.call_id,
+                _code(grpc.StatusCode.RESOURCE_EXHAUSTED),
+                f"SERVER: Sent message larger than max ({len(data)} vs. {self._send_limit})",
+            )
+            return None
+        return data
+
+
+class Server(_Codec, grpc.Server):
     """A grpc.Server whose HTTP/2 and gRPC work runs in Rust.
 
     Serves unary and server-streaming methods added with
@@ -425,53 +480,6 @@ class Server(grpc.Server):
                             _code(grpc.StatusCode.INTERNAL),
                             "Error dispatching call",
                         )
-
-    def _request(self, call: _Call, payload: bytes) -> tuple[bool, Any]:
-        front = self._front
-        assert front is not None
-        if self._receive_limit is not None and len(payload) > self._receive_limit:
-            front.fail(
-                call.call_id,
-                _code(grpc.StatusCode.RESOURCE_EXHAUSTED),
-                f"SERVER: Received message larger than max ({len(payload)} vs. {self._receive_limit})",
-            )
-            return False, None
-        deserializer = call.handler.request_deserializer
-        try:
-            return True, payload if deserializer is None else deserializer(payload)
-        except Exception:
-            _LOGGER.exception("Exception deserializing request!")
-            front.fail(
-                call.call_id,
-                _code(grpc.StatusCode.INTERNAL),
-                "Exception deserializing request!",
-            )
-            return False, None
-
-    def _serialize(self, call: _Call, response: Any) -> bytes | None:
-        front = self._front
-        assert front is not None
-        serializer = call.handler.response_serializer
-        try:
-            data = response if serializer is None else serializer(response)
-            if not isinstance(data, bytes):
-                raise TypeError(f"expected bytes, got {type(data).__name__}")
-        except Exception:
-            _LOGGER.exception("Failed to serialize response!")
-            front.fail(
-                call.call_id,
-                _code(grpc.StatusCode.INTERNAL),
-                "Failed to serialize response!",
-            )
-            return None
-        if self._send_limit is not None and len(data) > self._send_limit:
-            front.fail(
-                call.call_id,
-                _code(grpc.StatusCode.RESOURCE_EXHAUSTED),
-                f"SERVER: Sent message larger than max ({len(data)} vs. {self._send_limit})",
-            )
-            return None
-        return data
 
     def _fail(
         self, call: _Call, context: _Context, code: grpc.StatusCode, details: str
