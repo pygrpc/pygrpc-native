@@ -1,8 +1,10 @@
 """The 0.1 API that existing users call. New parameters may be added after
 the existing ones with a default; nothing here may change or go away."""
 
+import ast
 import inspect
 import threading
+from pathlib import Path
 
 import grpc
 
@@ -92,3 +94,27 @@ def test_events_and_return_values() -> None:
         assert isinstance(payload, bytes)
         assert isinstance(client_key, str)
     assert front.fail(10**9, 2, "gone") is False
+
+
+def test_stub_matches_the_constructor() -> None:
+    """The type stub lists every constructor parameter with the same default."""
+    stub = Path(pygrpc_native.__file__).with_name("_native.pyi")
+    tree = ast.parse(stub.read_text())
+    (init,) = [
+        node
+        for cls in tree.body
+        if isinstance(cls, ast.ClassDef) and cls.name == "NativeGrpcFront"
+        for node in cls.body
+        if isinstance(node, ast.FunctionDef) and node.name == "__init__"
+    ]
+    args = init.args.args[1:]
+    defaults = [None] * (len(args) - len(init.args.defaults)) + list(init.args.defaults)
+    stubbed = [
+        (arg.arg, _NO_DEFAULT if d is None else ast.literal_eval(d))
+        for arg, d in zip(args, defaults)
+    ]
+    actual = [
+        (p.name, p.default)
+        for p in inspect.signature(NativeGrpcFront).parameters.values()
+    ]
+    assert stubbed == actual
