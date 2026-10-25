@@ -1,6 +1,9 @@
 import collections
 import logging
+import os
+import shutil
 import sys
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterable, Sequence
@@ -61,6 +64,42 @@ def _parse_options(
         else:
             raise ValueError(f"unsupported server option {key!r}")
     return receive, send
+
+
+def _split_handlers(
+    registered: dict[str, grpc.RpcMethodHandler],
+    generic: Sequence[grpc.GenericRpcHandler],
+) -> tuple[
+    dict[str, grpc.RpcMethodHandler],
+    dict[str, dict[str, grpc.RpcMethodHandler]],
+    list[grpc.GenericRpcHandler],
+]:
+    """Splits handlers into the methods served natively and the ones left to
+    grpcio: streaming requests, and generic handlers of services that weren't
+    also registered (older generated code, hand-written handlers)."""
+    native: dict[str, grpc.RpcMethodHandler] = {}
+    streamed: dict[str, dict[str, grpc.RpcMethodHandler]] = {}
+    for path, handler in registered.items():
+        if handler.request_streaming:
+            service, name = path[1:].split("/")
+            streamed.setdefault(service, {})[name] = handler
+        else:
+            native[path] = handler
+    services = {path[1:].split("/")[0] for path in registered}
+    rest = [
+        handler
+        for handler in generic
+        if not (
+            isinstance(handler, grpc.ServiceRpcHandler)
+            and handler.service_name() in services
+        )
+    ]
+    return native, streamed, rest
+
+
+def _fallback_socket() -> tuple[str, str]:
+    directory = tempfile.mkdtemp(prefix="pygrpc-native-")
+    return directory, os.path.join(directory, "fallback.sock")
 
 
 class _Abort(Exception):
@@ -202,7 +241,7 @@ class Server(grpc.Server):
 
     Serves unary and server-streaming methods added with
     ``add_registered_method_handlers``, as generated code does, on one
-    insecure port.
+    insecure port. Other methods are served by a grpcio server behind it.
     """
 
     def __init__(
@@ -221,12 +260,15 @@ class Server(grpc.Server):
             raise NotImplementedError("maximum_concurrent_rpcs isn't supported yet")
         if compression not in (None, grpc.Compression.NoCompression):
             raise NotImplementedError("response compression isn't supported")
-        self._receive_limit, self._send_limit = _parse_options(options)
+        self._options = list(options or ())
+        self._receive_limit, self._send_limit = _parse_options(self._options)
         self._executor = thread_pool
         self._io_threads = io_threads
         self._generic_handlers = list(handlers or ())
         self._registered: dict[str, grpc.RpcMethodHandler] = {}
         self._front: NativeGrpcFront | None = None
+        self._fallback: grpc.Server | None = None
+        self._fallback_dir: str | None = None
         self._table: list[grpc.RpcMethodHandler] = []
         self._calls: dict[int, _Call] = {}
         self._lock = threading.Lock()
@@ -243,11 +285,6 @@ class Server(grpc.Server):
         self, service_name: str, method_handlers: dict[str, grpc.RpcMethodHandler]
     ) -> None:
         for name, handler in method_handlers.items():
-            if handler.request_streaming:
-                raise ValueError(
-                    f"/{service_name}/{name}: client-streaming and bidirectional "
-                    "methods aren't supported yet"
-                )
             self._registered[f"/{service_name}/{name}"] = handler
 
     def add_insecure_port(self, address: str) -> int:
@@ -276,28 +313,37 @@ class Server(grpc.Server):
                 raise ValueError("Cannot start already-started server!")
             if self._front is None:
                 raise RuntimeError("add a port with add_insecure_port() before start()")
-            registered = {path.split("/")[1] for path in self._registered}
-            for handler in self._generic_handlers:
-                service = (
-                    handler.service_name()
-                    if isinstance(handler, grpc.ServiceRpcHandler)
-                    else None
-                )
-                if service not in registered:
-                    raise ValueError(
-                        "only services added with add_registered_method_handlers are "
-                        "served; regenerate the code with grpcio-tools 1.62 or later"
-                    )
-            paths = list(self._registered)
-            self._front.add_methods(
-                [(path, self._registered[path].response_streaming) for path in paths]
+            native, streamed, generic = _split_handlers(
+                self._registered, self._generic_handlers
             )
-            self._table = [self._registered[path] for path in paths]
+            if streamed or generic:
+                self._start_fallback(streamed, generic)
+            paths = list(native)
+            self._front.add_methods(
+                [(path, native[path].response_streaming) for path in paths]
+            )
+            self._table = [native[path] for path in paths]
             self._front.start()
             self._started = True
         threading.Thread(
             target=self._dispatch, name="pygrpc-native-dispatch", daemon=True
         ).start()
+
+    def _start_fallback(
+        self,
+        streamed: dict[str, dict[str, grpc.RpcMethodHandler]],
+        generic: list[grpc.GenericRpcHandler],
+    ) -> None:
+        assert self._front is not None
+        self._fallback_dir, path = _fallback_socket()
+        fallback = grpc.server(self._executor, options=self._options)
+        fallback.add_generic_rpc_handlers(generic)
+        for service, handlers in streamed.items():
+            fallback.add_registered_method_handlers(service, handlers)
+        fallback.add_insecure_port(f"unix:{path}")
+        fallback.start()
+        self._fallback = fallback
+        self._front.set_fallback(path)
 
     def stop(self, grace: float | None) -> threading.Event:
         done = threading.Event()
@@ -307,11 +353,14 @@ class Server(grpc.Server):
                 self._shutdown(done)
                 return done
             self._stopping = True
+        fallback_done = None if self._fallback is None else self._fallback.stop(grace)
 
         def finish() -> None:
             deadline = time.monotonic() + (grace or 0)
             while self._calls and time.monotonic() < deadline:
                 time.sleep(0.01)
+            if fallback_done is not None:
+                fallback_done.wait(max(0.0, deadline - time.monotonic()))
             self._shutdown(done)
 
         if grace:
@@ -326,6 +375,10 @@ class Server(grpc.Server):
     def _shutdown(self, done: threading.Event) -> None:
         if self._front is not None:
             self._front.close()
+        if self._fallback is not None:
+            self._fallback.stop(None)
+        if self._fallback_dir is not None:
+            shutil.rmtree(self._fallback_dir, ignore_errors=True)
         for call in list(self._calls.values()):
             call.terminate()
         self._terminated.set()
