@@ -109,8 +109,15 @@ impl StreamSlot {
     }
 }
 
+pub enum AddMethodsError {
+    Started,
+    Duplicate(String),
+}
+
 pub struct Shared {
-    methods: HashMap<String, (u32, bool)>,
+    // Registered until start(), then frozen so routing needs no lock.
+    pending_methods: Mutex<Vec<(String, bool)>>,
+    methods: OnceLock<HashMap<String, (u32, bool)>>,
     events: crossbeam_channel::Sender<Event>,
     unary: Mutex<HashMap<u64, oneshot::Sender<Reply>>>,
     streams: Mutex<HashMap<u64, StreamSlot>>,
@@ -130,13 +137,9 @@ impl Shared {
         client_key_metadata: Option<String>,
         call_details: bool,
     ) -> Self {
-        let methods = methods
-            .into_iter()
-            .enumerate()
-            .map(|(i, (path, streaming))| (path, (i as u32, streaming)))
-            .collect();
         Shared {
-            methods,
+            pending_methods: Mutex::new(methods),
+            methods: OnceLock::new(),
             events,
             unary: Mutex::new(HashMap::new()),
             streams: Mutex::new(HashMap::new()),
@@ -148,6 +151,31 @@ impl Shared {
             client_key_metadata,
             call_details,
         }
+    }
+
+    pub fn add_methods(&self, methods: Vec<(String, bool)>) -> Result<Vec<u32>, AddMethodsError> {
+        let mut pending = self.pending_methods.lock().unwrap();
+        if self.methods.get().is_some() {
+            return Err(AddMethodsError::Started);
+        }
+        for (path, _) in &methods {
+            if pending.iter().any(|(known, _)| known == path) {
+                return Err(AddMethodsError::Duplicate(path.clone()));
+            }
+        }
+        let first = pending.len() as u32;
+        pending.extend(methods);
+        Ok((first..pending.len() as u32).collect())
+    }
+
+    pub fn freeze_methods(&self) {
+        let pending = self.pending_methods.lock().unwrap();
+        let methods = pending
+            .iter()
+            .enumerate()
+            .map(|(i, (path, streaming))| (path.clone(), (i as u32, *streaming)))
+            .collect();
+        let _ = self.methods.set(methods);
     }
 
     pub fn set_fallback(&self, path: PathBuf) -> bool {
@@ -609,7 +637,11 @@ async fn route(
     fallback: Arc<Fallback>,
     request: http::Request<RequestBody>,
 ) -> http::Response<tonic::body::Body> {
-    let Some(&(method_id, streaming)) = shared.methods.get(request.uri().path()) else {
+    let method = shared
+        .methods
+        .get()
+        .and_then(|methods| methods.get(request.uri().path()));
+    let Some(&(method_id, streaming)) = method else {
         return match shared.fallback.get() {
             Some(path) => fallback.forward(path, request).await,
             None => Status::new(Code::Unimplemented, "Method not found!").into_http(),
