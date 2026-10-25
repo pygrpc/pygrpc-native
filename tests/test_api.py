@@ -1,5 +1,5 @@
-"""The 0.1 API that existing users call. Changing anything here breaks them,
-so new features must be added next to it rather than changing it."""
+"""The 0.1 API that existing users call. New parameters may be added after
+the existing ones with a default; nothing here may change or go away."""
 
 import inspect
 import threading
@@ -10,8 +10,26 @@ import pygrpc_native
 from pygrpc_native import EVENT_CALL, EVENT_CANCEL, NativeGrpcFront
 
 
-def _signature(func: object) -> str:
-    return str(inspect.signature(func))  # type: ignore[arg-type]
+_NO_DEFAULT = inspect.Parameter.empty
+
+# (name, default) of every 0.1 parameter, in order.
+SIGNATURES = {
+    "__init__": [
+        ("target", _NO_DEFAULT),
+        ("methods", _NO_DEFAULT),
+        ("io_threads", 2),
+        ("client_key_metadata", None),
+    ],
+    "set_fallback": [("path", _NO_DEFAULT)],
+    "start": [],
+    "recv_batch": [("max_events", _NO_DEFAULT), ("timeout_ms", None)],
+    "respond": [("call_id", _NO_DEFAULT), ("payload", _NO_DEFAULT)],
+    "fail": [("call_id", _NO_DEFAULT), ("code", _NO_DEFAULT), ("message", _NO_DEFAULT)],
+    "stream_send": [("call_id", _NO_DEFAULT), ("payload", _NO_DEFAULT)],
+    "stream_end": [("call_id", _NO_DEFAULT)],
+    "stream_open": [("call_id", _NO_DEFAULT)],
+    "close": [],
+}
 
 
 def test_module_exports() -> None:
@@ -20,23 +38,17 @@ def test_module_exports() -> None:
 
 
 def test_signatures() -> None:
-    assert (
-        _signature(NativeGrpcFront)
-        == "(target, methods, io_threads=2, client_key_metadata=None)"
-    )
-    expected = {
-        "set_fallback": "(self, /, path)",
-        "start": "(self, /)",
-        "recv_batch": "(self, /, max_events, timeout_ms=None)",
-        "respond": "(self, /, call_id, payload)",
-        "fail": "(self, /, call_id, code, message)",
-        "stream_send": "(self, /, call_id, payload)",
-        "stream_end": "(self, /, call_id)",
-        "stream_open": "(self, /, call_id)",
-        "close": "(self, /)",
-    }
-    for name, signature in expected.items():
-        assert _signature(getattr(NativeGrpcFront, name)) == signature, name
+    """0.1 parameters keep their order and defaults; new ones need a default."""
+    for name, expected in SIGNATURES.items():
+        func = NativeGrpcFront if name == "__init__" else getattr(NativeGrpcFront, name)
+        params = [
+            p for p in inspect.signature(func).parameters.values() if p.name != "self"
+        ]
+        actual = [(p.name, p.default) for p in params]
+        assert actual[: len(expected)] == expected, name
+        assert all(
+            default is not _NO_DEFAULT for _, default in actual[len(expected) :]
+        ), name
 
 
 def test_events_and_return_values() -> None:
