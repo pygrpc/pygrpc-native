@@ -641,7 +641,7 @@ fn bind(target: &str) -> std::io::Result<BoundSockets> {
 }
 
 #[pymodule]
-fn pygrpc_native(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let _ = pyo3_log::try_init();
     m.add_class::<NativeGrpcFront>()?;
     m.add("EVENT_CALL", EVENT_CALL)?;
