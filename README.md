@@ -117,7 +117,7 @@ pass the serialized reply to `respond`.
 
 ## API
 
-`NativeGrpcFront(target, methods, io_threads=2, client_key_metadata=None, call_details=False, delay_stream_headers=False)`
+`NativeGrpcFront(target, methods, io_threads=2, client_key_metadata=None, call_details=False, delay_stream_headers=False, bearer_token_sha256=None, unauthenticated_message="Unauthenticated")`
 binds `host:port` (every address the host resolves to), `unix:path` or
 `unix:///path`. Port 0 picks a free port. `methods` lists
 `(path, server_streaming)` pairs, where a path is `/package.Service/Method`
@@ -167,6 +167,23 @@ for `-bin` keys and str otherwise. Keys must be lowercase and can't start with
 `grpc-`, except that `fail` accepts `grpc-status-details-bin` for a rich
 status, as grpcio's `abort_with_status` sends it.
 
+With `bearer_token_sha256`, a list of SHA-256 digests of the accepted
+tokens, every call must send `authorization: Bearer <token>` for one of them.
+Other calls end with UNAUTHENTICATED and `unauthenticated_message` on the
+tokio side, before the method lookup, so they never reach Python or the
+fallback server. The scheme is matched in any case, and the server only keeps
+the digests:
+
+```python
+import hashlib
+
+front = NativeGrpcFront(
+    "0.0.0.0:50051",
+    methods,
+    bearer_token_sha256=[hashlib.sha256(key.encode()).digest() for key in keys],
+)
+```
+
 `set_fallback` lets one port serve methods you don't list: run a regular
 `grpc.Server` on a Unix socket and its methods are proxied there, with its
 interceptors.
@@ -175,8 +192,8 @@ interceptors.
 
 - Unary and server-streaming methods only. Other kinds can go through the
   fallback server.
-- No TLS or authentication yet, and grpcio interceptors don't run on the
-  listed methods.
+- No TLS yet, and grpcio interceptors don't run on the listed methods. Bearer
+  tokens are the only authentication, and only on `NativeGrpcFront`.
 - Clients of a Unix socket server must set `grpc.default_authority`, since
   the socket path grpc-core sends as `:authority` is not valid HTTP/2.
 - Like grpc-core, binding a Unix socket path replaces any socket file

@@ -28,6 +28,8 @@ class NativeGrpcFront:
         client_key_metadata: str | None = None,
         call_details: bool = False,
         delay_stream_headers: bool = False,
+        bearer_token_sha256: Sequence[bytes] | None = None,
+        unauthenticated_message: str = "Unauthenticated",
     ) -> None: ...
     @property
     def bound_port(self) -> int: ...
