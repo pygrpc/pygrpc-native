@@ -25,11 +25,14 @@ use pyo3::types::{PyBytes, PyList, PyTuple};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::watch;
+use tonic::metadata::{
+    AsciiMetadataKey, AsciiMetadataValue, BinaryMetadataKey, BinaryMetadataValue, MetadataMap,
+};
 use tonic::{Code, Status};
 
 use server::{
-    accept_loop, AddMethodsError, CallDetails, ClientKey, Event, Listener, MetadataValue, Shared,
-    CONNECTION_DRAIN_TIMEOUT,
+    accept_loop, AddMethodsError, Answer, CallDetails, ClientKey, Event, Listener, MetadataValue,
+    Shared, CONNECTION_DRAIN_TIMEOUT,
 };
 
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -232,11 +235,26 @@ impl NativeGrpcFront {
         self.recv(py, max_events, timeout_ms, event_details_tuple)
     }
 
-    /// Send the serialized response of a unary call.
+    /// Send the serialized response of a unary call, with optional response
+    /// metadata as ``(key, value)`` pairs (bytes values for ``-bin`` keys).
     ///
     /// Returns False if the call no longer exists (client cancelled).
-    fn respond(&self, call_id: u64, payload: PyBackedBytes) -> bool {
-        self.shared.respond(call_id, Ok(Bytes::from_owner(payload)))
+    #[pyo3(signature = (call_id, payload, initial_metadata=None, trailing_metadata=None))]
+    fn respond(
+        &self,
+        call_id: u64,
+        payload: PyBackedBytes,
+        initial_metadata: Option<Vec<(String, Bound<'_, PyAny>)>>,
+        trailing_metadata: Option<Vec<(String, Bound<'_, PyAny>)>>,
+    ) -> PyResult<bool> {
+        let answer = Answer {
+            payload: Bytes::from_owner(payload),
+            initial_metadata: initial_metadata.map(metadata_map).transpose()?,
+            trailing_metadata: trailing_metadata
+                .map(|items| metadata_map(items).map(MetadataMap::into_headers))
+                .transpose()?,
+        };
+        Ok(self.shared.respond(call_id, Ok(answer)))
     }
 
     /// End a unary or streaming call with a non-OK status. Messages a stream
@@ -246,13 +264,34 @@ impl NativeGrpcFront {
     ///
     /// Raises:
     ///     ValueError: If ``code`` is 0 (OK).
-    fn fail(&self, call_id: u64, code: i32, message: &str) -> PyResult<bool> {
+    #[pyo3(signature = (call_id, code, message, trailing_metadata=None))]
+    fn fail(
+        &self,
+        call_id: u64,
+        code: i32,
+        message: &str,
+        trailing_metadata: Option<Vec<(String, Bound<'_, PyAny>)>>,
+    ) -> PyResult<bool> {
         if code == 0 {
             return Err(PyValueError::new_err(
                 "fail() needs a non-OK status; use respond() or stream_end()",
             ));
         }
-        let status = Status::new(Code::from_i32(code), message);
+        let mut items = trailing_metadata.unwrap_or_default();
+        // grpcio's abort_with_status() sends the rich status this way.
+        let details = match items.iter().position(|(key, _)| key == STATUS_DETAILS_KEY) {
+            Some(i) => {
+                let value: Vec<u8> = items.remove(i).1.extract()?;
+                Bytes::from(value)
+            }
+            None => Bytes::new(),
+        };
+        let status = Status::with_details_and_metadata(
+            Code::from_i32(code),
+            message,
+            details,
+            metadata_map(items)?,
+        );
         if self.shared.is_unary(call_id) {
             return Ok(self.shared.respond(call_id, Err(status)));
         }
@@ -287,8 +326,17 @@ impl NativeGrpcFront {
     }
 
     /// Finish a server-streaming call with an OK status.
-    fn stream_end(&self, call_id: u64) {
-        self.shared.end_stream(call_id, None);
+    #[pyo3(signature = (call_id, trailing_metadata=None))]
+    fn stream_end(
+        &self,
+        call_id: u64,
+        trailing_metadata: Option<Vec<(String, Bound<'_, PyAny>)>>,
+    ) -> PyResult<()> {
+        let status = trailing_metadata
+            .map(|items| metadata_map(items).map(|md| Status::with_metadata(Code::Ok, "", md)))
+            .transpose()?;
+        self.shared.end_stream(call_id, status);
+        Ok(())
     }
 
     /// Whether a server-streaming call is still open.
@@ -384,6 +432,35 @@ impl NativeGrpcFront {
         }
         Ok(Some(items))
     }
+}
+
+const STATUS_DETAILS_KEY: &str = "grpc-status-details-bin";
+
+fn metadata_map(items: Vec<(String, Bound<'_, PyAny>)>) -> PyResult<MetadataMap> {
+    let mut metadata = MetadataMap::with_capacity(items.len());
+    for (key, value) in items {
+        if key.starts_with("grpc-") || key.starts_with(':') {
+            return Err(PyValueError::new_err(format!(
+                "metadata key {key:?} is reserved"
+            )));
+        }
+        let invalid = || PyValueError::new_err(format!("invalid metadata {key:?}"));
+        // Keys arrive lowercased on the wire, so grpcio rejects uppercase ones.
+        if key.bytes().any(|b| b.is_ascii_uppercase()) {
+            return Err(invalid());
+        }
+        if key.ends_with("-bin") {
+            let key = BinaryMetadataKey::from_bytes(key.as_bytes()).map_err(|_| invalid())?;
+            let value: &[u8] = value.extract().map_err(|_| invalid())?;
+            metadata.append_bin(key, BinaryMetadataValue::from_bytes(value));
+        } else {
+            let key = AsciiMetadataKey::from_bytes(key.as_bytes()).map_err(|_| invalid())?;
+            let value: &str = value.extract().map_err(|_| invalid())?;
+            let value = AsciiMetadataValue::try_from(value).map_err(|_| invalid())?;
+            metadata.append(key, value);
+        }
+    }
+    Ok(metadata)
 }
 
 fn event_tuple<'py>(py: Python<'py>, event: Event) -> PyResult<Bound<'py, PyTuple>> {

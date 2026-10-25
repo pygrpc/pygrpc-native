@@ -83,11 +83,11 @@ before `start()`, so the port can be bound before the methods are known.
 | `start()` | start accepting connections |
 | `recv_batch(max_events, timeout_ms=None)` | wait for events with the GIL released; `None` once closed |
 | `recv_batch_details(max_events, timeout_ms=None)` | the same, with call details as a sixth item |
-| `respond(call_id, payload)` | answer a unary call |
-| `fail(call_id, code, message)` | end any call with a non-OK status, without blocking |
+| `respond(call_id, payload, initial_metadata=None, trailing_metadata=None)` | answer a unary call |
+| `fail(call_id, code, message, trailing_metadata=None)` | end any call with a non-OK status, without blocking |
 | `stream_send(call_id, payload)` | send one streamed message; blocks while the client is not reading |
 | `stream_try_send(call_id, payload)` | the same without blocking: `STREAM_SENT`, `STREAM_FULL` (not queued) or `STREAM_CLOSED` |
-| `stream_end(call_id)` | finish a stream with OK; a stream cut short by `close()` ends with UNAVAILABLE |
+| `stream_end(call_id, trailing_metadata=None)` | finish a stream with OK; a stream cut short by `close()` ends with UNAVAILABLE |
 | `stream_open(call_id)` | whether the client is still reading a stream |
 | `close()` | stop without waiting for calls in flight; their clients get UNAVAILABLE |
 
@@ -104,6 +104,11 @@ With `call_details=True`, `recv_batch_details` adds
 in order without the transport headers, with `-bin` values as bytes, the peer
 as `ipv4:host:port`, and the seconds left before the deadline or `None`.
 Without it the sixth item is `None`, and nothing extra is collected per call.
+
+Response metadata is a sequence of `(key, value)` pairs, with bytes values
+for `-bin` keys and str otherwise. Keys must be lowercase and can't start with
+`grpc-`, except that `fail` accepts `grpc-status-details-bin` for a rich
+status, as grpcio's `abort_with_status` sends it.
 
 `set_fallback` lets one port serve methods you don't list: run a regular
 `grpc.Server` on a Unix socket and its methods are proxied there, with its

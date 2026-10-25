@@ -83,7 +83,18 @@ pub enum Event {
     Closed,
 }
 
-type Reply = Result<Bytes, Status>;
+pub struct Answer {
+    pub payload: Bytes,
+    pub initial_metadata: Option<tonic::metadata::MetadataMap>,
+    pub trailing_metadata: Option<http::HeaderMap>,
+}
+
+pub type Reply = Result<Answer, Status>;
+
+/// Response metadata the trailers of a unary OK response must carry, which
+/// tonic's unary encoder has no room for.
+#[derive(Clone)]
+struct ExtraTrailers(http::HeaderMap);
 
 /// How a server-streaming call ends once its message channel is drained.
 /// Only `stream_end` may end it with OK; a channel that closes without an
@@ -91,7 +102,9 @@ type Reply = Result<Bytes, Status>;
 enum StreamEnd {
     Open,
     Ok,
-    Failed(Status),
+    // Also used for OK with trailing metadata: tonic writes any status
+    // yielded by the stream as the trailers.
+    Status(Status),
 }
 
 #[derive(Clone)]
@@ -206,7 +219,7 @@ impl Shared {
         };
         slot.finish(match status {
             None => StreamEnd::Ok,
-            Some(status) => StreamEnd::Failed(status),
+            Some(status) => StreamEnd::Status(status),
         });
         true
     }
@@ -226,7 +239,7 @@ impl Shared {
         }
         let streams: Vec<_> = self.streams.lock().unwrap().drain().collect();
         for (_, slot) in streams {
-            slot.finish(StreamEnd::Failed(shutting_down()));
+            slot.finish(StreamEnd::Status(shutting_down()));
         }
     }
 
@@ -498,7 +511,16 @@ impl UnaryService<Bytes> for UnaryCall {
                 return Err(shutting_down());
             }
             match receiver.await {
-                Ok(reply) => reply.map(tonic::Response::new),
+                Ok(reply) => reply.map(|answer| {
+                    let mut response = tonic::Response::new(answer.payload);
+                    if let Some(metadata) = answer.initial_metadata {
+                        *response.metadata_mut() = metadata;
+                    }
+                    if let Some(trailers) = answer.trailing_metadata {
+                        response.extensions_mut().insert(ExtraTrailers(trailers));
+                    }
+                    response
+                }),
                 Err(_) => Err(shutting_down()),
             }
         })
@@ -517,9 +539,12 @@ pub(crate) struct ResponseStream {
 }
 
 impl Stream for ResponseStream {
-    type Item = Reply;
+    type Item = Result<Bytes, Status>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Reply>> {
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Bytes, Status>>> {
         if self.done {
             return Poll::Ready(None);
         }
@@ -536,7 +561,7 @@ impl Stream for ResponseStream {
                 let end = std::mem::replace(&mut *self.end.lock().unwrap(), StreamEnd::Ok);
                 Poll::Ready(match end {
                     StreamEnd::Ok => None,
-                    StreamEnd::Failed(status) => Some(Err(status)),
+                    StreamEnd::Status(status) => Some(Err(status)),
                     StreamEnd::Open => Some(Err(shutting_down())),
                 })
             }
@@ -666,7 +691,7 @@ async fn route(
                 peer,
                 deadline,
             };
-            grpc().unary(call, request).await
+            with_extra_trailers(grpc().unary(call, request).await)
         }
     };
     match deadline {
@@ -877,6 +902,57 @@ async fn send_body(send: &mut h2::SendStream<Bytes>, body: tonic::body::Body) {
 
 /// A request body read from an HTTP/2 stream, handing flow-control credit
 /// back as it is read.
+fn with_extra_trailers(
+    mut response: http::Response<tonic::body::Body>,
+) -> http::Response<tonic::body::Body> {
+    let Some(ExtraTrailers(extra)) = response.extensions_mut().remove::<ExtraTrailers>() else {
+        return response;
+    };
+    response.map(|inner| {
+        tonic::body::Body::new(TrailersBody {
+            inner,
+            extra: Some(extra),
+        })
+    })
+}
+
+struct TrailersBody {
+    inner: tonic::body::Body,
+    extra: Option<http::HeaderMap>,
+}
+
+impl http_body::Body for TrailersBody {
+    type Data = Bytes;
+    type Error = Status;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Status>>> {
+        let frame = match Pin::new(&mut self.inner).poll_frame(cx) {
+            Poll::Ready(Some(Ok(frame))) => frame,
+            other => return other,
+        };
+        match frame.into_trailers() {
+            Ok(mut trailers) => {
+                if let Some(extra) = self.extra.take() {
+                    trailers.extend(extra);
+                }
+                Poll::Ready(Some(Ok(Frame::trailers(trailers))))
+            }
+            Err(frame) => Poll::Ready(Some(Ok(frame))),
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
+    }
+}
+
 pub(crate) struct RequestBody {
     recv: h2::RecvStream,
     data_done: bool,
