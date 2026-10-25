@@ -493,7 +493,19 @@ struct UnaryGuard {
 
 impl Drop for UnaryGuard {
     fn drop(&mut self) {
-        self.shared.unary.lock().unwrap().remove(&self.call_id);
+        let unanswered = self
+            .shared
+            .unary
+            .lock()
+            .unwrap()
+            .remove(&self.call_id)
+            .is_some();
+        // Only with call_details, so 0.1 callers never see cancels for unary calls.
+        if unanswered && self.shared.call_details && !self.shared.is_closed() {
+            let _ = self.shared.events.send(Event::Cancel {
+                call_id: self.call_id,
+            });
+        }
     }
 }
 

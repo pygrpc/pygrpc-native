@@ -62,7 +62,8 @@ struct Running {
 ///         Python as the client key, or None to always pass the peer address.
 ///         Calls without it also get the peer address.
 ///     call_details: Collect each call's request metadata, peer and deadline
-///         for ``recv_batch_details``.
+///         for ``recv_batch_details``, and also send a cancel event when a
+///         unary call ends (client cancel or deadline) before it is answered.
 ///     delay_stream_headers: Send a stream's response headers with its first
 ///         message or ``stream_send_initial_metadata``, as grpcio does,
 ///         instead of when the call starts.
