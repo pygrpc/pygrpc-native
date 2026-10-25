@@ -365,6 +365,7 @@ class Server(grpc.Server):
                     self._executor.submit(run, call, payload)
                 except Exception:
                     _LOGGER.exception("Error dispatching call %d", call_id)
+                    self._calls.pop(call_id, None)
                     if kind == EVENT_CALL:
                         front.fail(
                             call_id,
