@@ -27,7 +27,7 @@ use tokio::sync::watch;
 use tonic::{Code, Status};
 
 use server::{
-    accept_loop, CallDetails, ClientKey, Event, Listener, MetadataValue, Shared,
+    accept_loop, AddMethodsError, CallDetails, ClientKey, Event, Listener, MetadataValue, Shared,
     CONNECTION_DRAIN_TIMEOUT,
 };
 
@@ -152,6 +152,30 @@ impl NativeGrpcFront {
         }
     }
 
+    /// Register more methods before ``start()``.
+    ///
+    /// Args:
+    ///     methods: ``(path, server_streaming)`` pairs, as for the constructor.
+    ///
+    /// Returns:
+    ///     The method ids of the new methods, which continue after the ones
+    ///     already registered.
+    ///
+    /// Raises:
+    ///     RuntimeError: If the server was already started or closed.
+    ///     ValueError: If a path is already registered.
+    fn add_methods(&self, methods: Vec<(String, bool)>) -> PyResult<Vec<u32>> {
+        if self.running.lock().unwrap().is_none() {
+            return Err(PyRuntimeError::new_err("server is closed"));
+        }
+        self.shared.add_methods(methods).map_err(|err| match err {
+            AddMethodsError::Started => PyRuntimeError::new_err("server already started"),
+            AddMethodsError::Duplicate(path) => {
+                PyValueError::new_err(format!("method {path} is already registered"))
+            }
+        })
+    }
+
     /// Start accepting connections.
     ///
     /// Raises:
@@ -164,6 +188,7 @@ impl NativeGrpcFront {
         if running.listeners.is_empty() {
             return Err(PyRuntimeError::new_err("server already started"));
         }
+        self.shared.freeze_methods();
         for listener in running.listeners.drain(..) {
             running.runtime.spawn(accept_loop(
                 listener,

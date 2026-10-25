@@ -72,11 +72,13 @@ pass the serialized reply to `respond`.
 binds `host:port` (every address the host resolves to), `unix:path` or
 `unix:///path`. Port 0 picks a free port. `methods` lists
 `(path, server_streaming)` pairs, where a path is `/package.Service/Method`
-and a method's id is its index in the list.
+and a method's id is its index in the list. `add_methods` appends more
+before `start()`, so the port can be bound before the methods are known.
 
 | Member | Purpose |
 |---|---|
 | `bound_port` | the bound TCP port; 1 for a Unix socket, as grpcio reports it |
+| `add_methods(methods)` | register more methods before `start()`; returns their ids |
 | `set_fallback(path)` | forward unknown methods to a grpcio server on a Unix socket |
 | `start()` | start accepting connections |
 | `recv_batch(max_events, timeout_ms=None)` | wait for events with the GIL released; `None` once closed |
