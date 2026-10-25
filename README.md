@@ -68,7 +68,7 @@ pass the serialized reply to `respond`.
 
 ## API
 
-`NativeGrpcFront(target, methods, io_threads=2, client_key_metadata=None, call_details=False)`
+`NativeGrpcFront(target, methods, io_threads=2, client_key_metadata=None, call_details=False, delay_stream_headers=False)`
 binds `host:port` (every address the host resolves to), `unix:path` or
 `unix:///path`. Port 0 picks a free port. `methods` lists
 `(path, server_streaming)` pairs, where a path is `/package.Service/Method`
@@ -87,6 +87,7 @@ before `start()`, so the port can be bound before the methods are known.
 | `fail(call_id, code, message, trailing_metadata=None)` | end any call with a non-OK status, without blocking |
 | `stream_send(call_id, payload)` | send one streamed message; blocks while the client is not reading |
 | `stream_try_send(call_id, payload)` | the same without blocking: `STREAM_SENT`, `STREAM_FULL` (not queued) or `STREAM_CLOSED` |
+| `stream_send_initial_metadata(call_id, metadata)` | send a held-back stream's headers now |
 | `stream_end(call_id, trailing_metadata=None)` | finish a stream with OK; a stream cut short by `close()` ends with UNAVAILABLE |
 | `stream_open(call_id)` | whether the client is still reading a stream |
 | `close()` | stop without waiting for calls in flight; their clients get UNAVAILABLE |
@@ -104,6 +105,11 @@ With `call_details=True`, `recv_batch_details` adds
 in order without the transport headers, with `-bin` values as bytes, the peer
 as `ipv4:host:port`, and the seconds left before the deadline or `None`.
 Without it the sixth item is `None`, and nothing extra is collected per call.
+
+A stream sends its response headers as soon as the call starts. With
+`delay_stream_headers=True` they wait, as in grpcio, for the first message or
+`stream_send_initial_metadata`, which is how a stream gets initial metadata; a
+stream that ends before either is answered with trailers only.
 
 Response metadata is a sequence of `(key, value)` pairs, with bytes values
 for `-bin` keys and str otherwise. Keys must be lowercase and can't start with

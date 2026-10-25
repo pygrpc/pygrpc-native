@@ -107,10 +107,12 @@ enum StreamEnd {
     Status(Status),
 }
 
-#[derive(Clone)]
 pub(crate) struct StreamSlot {
     sender: mpsc::Sender<Bytes>,
     end: Arc<Mutex<StreamEnd>>,
+    // With delay_stream_headers, releases the response headers; an Err ends
+    // the call before any message, as a trailers-only response.
+    start: Option<oneshot::Sender<Result<tonic::metadata::MetadataMap, Status>>>,
 }
 
 impl StreamSlot {
@@ -141,6 +143,7 @@ pub struct Shared {
     fallback: OnceLock<PathBuf>,
     client_key_metadata: Option<String>,
     call_details: bool,
+    delay_stream_headers: bool,
 }
 
 impl Shared {
@@ -149,6 +152,7 @@ impl Shared {
         events: crossbeam_channel::Sender<Event>,
         client_key_metadata: Option<String>,
         call_details: bool,
+        delay_stream_headers: bool,
     ) -> Self {
         Shared {
             pending_methods: Mutex::new(methods),
@@ -163,6 +167,7 @@ impl Shared {
             fallback: OnceLock::new(),
             client_key_metadata,
             call_details,
+            delay_stream_headers,
         }
     }
 
@@ -212,11 +217,35 @@ impl Shared {
         streams.get(&call_id).map(|slot| slot.sender.clone())
     }
 
+    /// The sender for a stream's next message, releasing its headers first.
+    pub fn message_sender(&self, call_id: u64) -> Option<mpsc::Sender<Bytes>> {
+        let mut streams = self.streams.lock().unwrap();
+        let slot = streams.get_mut(&call_id)?;
+        if let Some(start) = slot.start.take() {
+            let _ = start.send(Ok(tonic::metadata::MetadataMap::new()));
+        }
+        Some(slot.sender.clone())
+    }
+
+    pub fn send_initial_metadata(
+        &self,
+        call_id: u64,
+        metadata: tonic::metadata::MetadataMap,
+    ) -> bool {
+        let mut streams = self.streams.lock().unwrap();
+        let start = streams.get_mut(&call_id).and_then(|slot| slot.start.take());
+        start.is_some_and(|start| start.send(Ok(metadata)).is_ok())
+    }
+
     /// End a stream; it closes once the messages already queued are sent.
     pub fn end_stream(&self, call_id: u64, status: Option<Status>) -> bool {
-        let Some(slot) = self.streams.lock().unwrap().remove(&call_id) else {
+        let Some(mut slot) = self.streams.lock().unwrap().remove(&call_id) else {
             return false;
         };
+        if let Some(start) = slot.start.take() {
+            let status = status.clone().unwrap_or_else(|| Status::ok(""));
+            let _ = start.send(Err(status));
+        }
         slot.finish(match status {
             None => StreamEnd::Ok,
             Some(status) => StreamEnd::Status(status),
@@ -617,9 +646,16 @@ impl ServerStreamingService<Bytes> for StreamingCall {
             let call_id = shared.next_call_id();
             let (sender, receiver) = mpsc::channel(STREAM_READ_AHEAD);
             let end = Arc::new(Mutex::new(StreamEnd::Open));
+            let (start, started) = if shared.delay_stream_headers {
+                let (start, started) = oneshot::channel();
+                (Some(start), Some(started))
+            } else {
+                (None, None)
+            };
             let slot = StreamSlot {
                 sender,
                 end: end.clone(),
+                start,
             };
             shared.streams.lock().unwrap().insert(call_id, slot);
             let stream = ResponseStream {
@@ -643,7 +679,18 @@ impl ServerStreamingService<Bytes> for StreamingCall {
             if shared.events.send(event).is_err() {
                 return Err(shutting_down());
             }
-            Ok(tonic::Response::new(stream))
+            let Some(started) = started else {
+                return Ok(tonic::Response::new(stream));
+            };
+            match started.await {
+                Ok(Ok(metadata)) => {
+                    let mut response = tonic::Response::new(stream);
+                    *response.metadata_mut() = metadata;
+                    Ok(response)
+                }
+                Ok(Err(status)) => Err(status),
+                Err(_) => Err(shutting_down()),
+            }
         })
     }
 }
