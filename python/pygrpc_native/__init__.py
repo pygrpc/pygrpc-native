@@ -1,3 +1,5 @@
+from typing import TYPE_CHECKING
+
 from pygrpc_native._native import (
     EVENT_CALL,
     EVENT_CANCEL,
@@ -7,6 +9,9 @@ from pygrpc_native._native import (
     NativeGrpcFront,
     __version__,
 )
+
+if TYPE_CHECKING:
+    from pygrpc_native._server import Server, server
 
 __all__ = [
     "Server",
