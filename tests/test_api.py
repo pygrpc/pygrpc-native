@@ -35,6 +35,7 @@ SIGNATURES = {
 def test_module_exports() -> None:
     assert isinstance(pygrpc_native.__version__, str)
     assert (EVENT_CALL, EVENT_CANCEL) == (0, 1)
+    assert NativeGrpcFront.__module__ == "pygrpc_native"
 
 
 def test_signatures() -> None:

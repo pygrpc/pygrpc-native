@@ -22,4 +22,5 @@ Repository = "https://github.com/theminjunchoi/pygrpc-native"
 
 [tool.maturin]
 bindings = "pyo3"
-module-name = "pygrpc_native"
+python-source = "python"
+module-name = "pygrpc_native._native"
