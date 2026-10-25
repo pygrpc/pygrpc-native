@@ -35,7 +35,31 @@ pip install maturin
 maturin develop --release
 ```
 
-## Example
+## With grpcio servicers
+
+`pygrpc_native.server()` takes the same arguments as `grpc.server()` and
+serves servicers from grpcio-tools generated code (1.62 or later) unchanged:
+
+```python
+from concurrent import futures
+import pygrpc_native
+
+server = pygrpc_native.server(futures.ThreadPoolExecutor(16))
+greeter_pb2_grpc.add_GreeterServicer_to_server(Greeter(), server)
+server.add_insecure_port("[::]:50051")
+server.start()
+server.wait_for_termination()
+```
+
+Status codes, error messages, metadata, deadlines, cancellation and
+`ServicerContext` behave as they do in grpcio. It serves unary and
+server-streaming methods on one insecure port. Interceptors,
+`maximum_concurrent_rpcs`, TLS, response compression and server options other
+than the message size limits and client ping settings raise an error instead
+of being ignored, and so does registering a client-streaming or bidirectional
+method.
+
+## Low-level example
 
 ```python
 import threading
