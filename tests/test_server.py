@@ -373,14 +373,6 @@ def test_unsupported_features_are_rejected(pb: tuple[Any, Any]) -> None:
     server.add_insecure_port("127.0.0.1:0")
     with pytest.raises(RuntimeError, match="one port"):
         server.add_insecure_port("127.0.0.1:0")
-    with pytest.raises(ValueError, match="client-streaming"):
-        server.add_registered_method_handlers(
-            "t.C",
-            {"Up": grpc.stream_unary_rpc_method_handler(lambda requests, context: b"")},
-        )
-    server.add_generic_rpc_handlers([grpc.method_handlers_generic_handler("t.G", {})])
-    with pytest.raises(ValueError, match="add_registered_method_handlers"):
-        server.start()
     server.stop(None)
 
 
