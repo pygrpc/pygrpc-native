@@ -585,6 +585,10 @@ def test_sync_handlers_get_grpcio_sync_context() -> None:
         context.add_callback(lambda: called.append("done"))
         return request
 
+    def extra(request: bytes, context: Any) -> bytes:
+        # Not on grpcio's sync context, but it worked here before.
+        return str(context.cancelled()).encode()
+
     def stream_abort(request: bytes, context: Any) -> Iterator[bytes]:
         yield b"1"
         context.abort(grpc.StatusCode.ABORTED, "stop")
@@ -596,6 +600,7 @@ def test_sync_handlers_get_grpcio_sync_context() -> None:
         "Status": grpc.unary_unary_rpc_method_handler(status),
         "Metadata": grpc.unary_unary_rpc_method_handler(metadata),
         "StreamAbort": grpc.unary_stream_rpc_method_handler(stream_abort),
+        "Extra": grpc.unary_unary_rpc_method_handler(extra),
     }
 
     def calls(port: int, stream_abort: bool) -> dict[str, Any]:
@@ -615,6 +620,7 @@ def test_sync_handlers_get_grpcio_sync_context() -> None:
                 [m for m in call.trailing_metadata() if m[0].startswith("x-")],
             )
             if stream_abort:
+                out["Extra"] = channel.unary_unary("/s.S/Extra")(b"x", timeout=5)
                 received: list[bytes] = []
                 try:
                     for message in channel.unary_stream("/s.S/StreamAbort")(
@@ -642,6 +648,7 @@ def test_sync_handlers_get_grpcio_sync_context() -> None:
     # grpcio 1.84 never ends a sync stream that aborts: its client waits for
     # the deadline and the handler's thread can hang, so only check it here.
     assert native.pop("StreamAbort") == ([b"1"], grpc.StatusCode.ABORTED, "stop")
+    assert native.pop("Extra") == b"False"
     assert native == asyncio.run(run(aio.server, stream_abort=False))
     assert native_called == called == ["done"]
     assert native["Abort"] == (grpc.StatusCode.PERMISSION_DENIED, "denied")
