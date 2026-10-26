@@ -4,12 +4,20 @@ All notable changes are listed here. The project follows
 [semantic versioning](https://semver.org); see
 [Compatibility](README.md#compatibility) for what that covers.
 
-## Unreleased
+## 0.3.0 (2026-10-26)
+
+Everything here is an addition, so code written for 0.1 and 0.2 keeps working.
 
 ### Added
 
 - `NativeGrpcFront(metrics=True)` and `metrics()`: call counts and latencies
-  per method and status, recorded in Rust without the GIL.
+  per method and status, recorded in Rust without the GIL. The keys
+  `metrics()` returns are covered by the compatibility promise. (#29, #31)
+
+### Changed
+
+- The low-level API reference moved from the README to
+  [docs/low-level-api.md](docs/low-level-api.md). (#31)
 
 ## 0.2.0 (2026-10-25)
 
