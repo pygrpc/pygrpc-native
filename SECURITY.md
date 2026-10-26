@@ -6,7 +6,7 @@ pull requests.
 ## Reporting a vulnerability
 
 Use **Report a vulnerability** on the
-[Security tab](https://github.com/theminjunchoi/pygrpc-native/security), which
+[Security tab](https://github.com/pygrpc/pygrpc-native/security), which
 only the maintainers can see. It helps to include:
 
 - the affected version or commit
