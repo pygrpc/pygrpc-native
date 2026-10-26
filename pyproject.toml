@@ -24,3 +24,5 @@ Repository = "https://github.com/theminjunchoi/pygrpc-native"
 bindings = "pyo3"
 python-source = "python"
 module-name = "pygrpc_native._native"
+# The patched http crate (see Cargo.toml) has to ship in the sdist.
+include = [{ path = "vendor/**/*", format = "sdist" }]

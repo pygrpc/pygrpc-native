@@ -481,6 +481,7 @@ const fn validate_authority_bytes(s: &[u8]) -> Result<usize, AuthorityError> {
     let mut start_bracket = false;
     let mut end_bracket = false;
     let mut has_percent = false;
+    let mut bad_percent = false;
     let mut end = s.len();
     let mut at_sign_pos: usize = s.len();
     const MAX_COLONS: u32 = 8; // e.g., [FEDC:BA98:7654:3210:FEDC:BA98:7654:3210]:80
@@ -508,10 +509,18 @@ const fn validate_authority_bytes(s: &[u8]) -> Result<usize, AuthorityError> {
                 // part of the userinfo, this flag will be cleared.
                 // Also per https://tools.ietf.org/html/rfc6874, percent-encoding can
                 // be used to indicate a zone identifier.
-                // If the flag hasn't been cleared at the end, that means this
-                // was part of the hostname (and not part of an IPv6 address), and
-                // will fail with an error.
+                // If the flag hasn't been cleared at the end, this was part of
+                // the hostname, which RFC 3986 lets be percent-encoded (grpc-core
+                // sends a Unix socket path that way), so it must be a valid
+                // escape and not in the port.
                 has_percent = true;
+                if colon_cnt > 0
+                    || i + 2 >= s.len()
+                    || !s[i + 1].is_ascii_hexdigit()
+                    || !s[i + 2].is_ascii_hexdigit()
+                {
+                    bad_percent = true;
+                }
             } else {
                 return Err(AuthorityError::InvalidUriChar);
             }
@@ -535,6 +544,7 @@ const fn validate_authority_bytes(s: &[u8]) -> Result<usize, AuthorityError> {
             // Those were part of an IPv6 hostname, so forget them...
             colon_cnt = 0;
             has_percent = false;
+            bad_percent = false;
         } else if ch == b'@' {
             at_sign_pos = i;
 
@@ -542,6 +552,7 @@ const fn validate_authority_bytes(s: &[u8]) -> Result<usize, AuthorityError> {
             // userinfo, so it needs to be forgotten.
             colon_cnt = 0;
             has_percent = false;
+            bad_percent = false;
         }
 
         i += 1;
@@ -561,8 +572,8 @@ const fn validate_authority_bytes(s: &[u8]) -> Result<usize, AuthorityError> {
         return Err(AuthorityError::EmptyAfterAt);
     }
 
-    if has_percent {
-        // Something after the userinfo has a `%`, so reject it.
+    if has_percent && (start_bracket || bad_percent) {
+        // Beside an IPv6 address, or not a valid escape.
         return Err(AuthorityError::InvalidPercent);
     }
 
@@ -674,12 +685,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_percent_in_hostname() {
-        let err = Authority::parse_non_empty(b"example%2f.com").unwrap_err();
-        assert_eq!(err.0, ErrorKind::InvalidAuthority);
+    fn allows_percent_encoded_hostname() {
+        for s in ["example%2f.com", "a%2f:b%2f@example%2f.com", "tmp%2Fx%2Fs.sock"] {
+            let authority: Authority = s.parse().unwrap();
+            assert_eq!(authority, s);
+        }
+    }
 
-        let err = Authority::parse_non_empty(b"a%2f:b%2f@example%2f.com").unwrap_err();
-        assert_eq!(err.0, ErrorKind::InvalidAuthority);
+    #[test]
+    fn rejects_invalid_percent_in_hostname() {
+        for s in [
+            &b"example%2.com"[..],
+            b"example%zz.com",
+            b"example%",
+            b"a@b%2",
+            b"example.com:%38%30",
+        ] {
+            let err = Authority::parse_non_empty(s).unwrap_err();
+            assert_eq!(err.0, ErrorKind::InvalidAuthority);
+        }
     }
 
     #[test]
