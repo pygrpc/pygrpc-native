@@ -21,7 +21,7 @@ use hyper::client::conn::http2 as client_http2;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::{mpsc, oneshot, watch, Notify};
 use tonic::codec::{Codec, CompressionEncoding, DecodeBuf, Decoder, EncodeBuf, Encoder};
 use tonic::server::{Grpc, ServerStreamingService, UnaryService};
@@ -49,8 +49,21 @@ const MAX_CONCURRENT_STREAMS: u32 = 1024;
 const MAX_HEADER_LIST_SIZE: u32 = 16 << 10;
 // grpc-core's default; a connection that never finishes the preface is dropped.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
-const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(2 * 60 * 60);
-const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
+// grpc-core's default ping timeout: the longest a keepalive ping goes
+// unanswered, even while the client keeps sending.
+const PING_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// When the server pings a connection to check that the client is still
+/// there, like grpc-core's keepalive arguments.
+#[derive(Clone, Copy, Debug)]
+pub struct Keepalive {
+    /// Time between pings; None never pings.
+    pub time: Option<Duration>,
+    /// How long to wait for the answer before closing the connection.
+    pub timeout: Duration,
+    /// Whether to ping a connection that has no calls in flight.
+    pub without_calls: bool,
+}
 
 // Unix sockets have no peer address, so each connection gets its own name.
 static NEXT_UNIX_PEER: AtomicU64 = AtomicU64::new(1);
@@ -186,6 +199,7 @@ pub struct Shared {
     call_details: bool,
     delay_stream_headers: bool,
     bearer_auth: Option<BearerAuth>,
+    keepalive: Keepalive,
     // Shard count when metrics are on; the metrics are built at start().
     metrics_shards: Option<usize>,
     metrics: OnceLock<Metrics>,
@@ -193,6 +207,7 @@ pub struct Shared {
 }
 
 impl Shared {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         methods: Vec<(String, bool)>,
         events: crossbeam_channel::Sender<Event>,
@@ -200,6 +215,7 @@ impl Shared {
         call_details: bool,
         delay_stream_headers: bool,
         bearer_auth: Option<BearerAuth>,
+        keepalive: Keepalive,
         metrics_shards: Option<usize>,
     ) -> Self {
         Shared {
@@ -217,6 +233,7 @@ impl Shared {
             call_details,
             delay_stream_headers,
             bearer_auth,
+            keepalive,
             metrics_shards,
             metrics: OnceLock::new(),
             metrics_since: metrics::unix_nanos(),
@@ -888,6 +905,11 @@ pub(crate) async fn serve_connection<IO>(
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let _open = OpenConnection::new(shared.clone());
+    let reads = Arc::new(LastRead::new());
+    let io = Watched {
+        io,
+        reads: reads.clone(),
+    };
     let handshake = h2::server::Builder::new()
         .initial_window_size(STREAM_WINDOW)
         .initial_connection_window_size(CONNECTION_WINDOW)
@@ -909,19 +931,30 @@ pub(crate) async fn serve_connection<IO>(
         _ = stopped(&mut shutdown) => return,
     };
     let fallback = Arc::new(Fallback::default());
-    let keepalive = keepalive(connection.ping_pong());
+    let active = Arc::new(AtomicUsize::new(0));
+    let keepalive = keepalive(
+        shared.keepalive,
+        connection.ping_pong(),
+        active.clone(),
+        reads,
+    );
     tokio::pin!(keepalive);
     loop {
         tokio::select! {
             accepted = connection.accept() => match accepted {
                 Some(Ok((request, respond))) => {
-                    tokio::spawn(serve_stream(
+                    let call = ActiveCall::new(active.clone());
+                    let stream = serve_stream(
                         shared.clone(),
                         peer.clone(),
                         fallback.clone(),
                         request,
                         respond,
-                    ));
+                    );
+                    tokio::spawn(async move {
+                        let _call = call;
+                        stream.await;
+                    });
                 }
                 Some(Err(err)) => {
                     log::debug!("gRPC connection ended with error: {err}");
@@ -945,18 +978,141 @@ pub(crate) async fn serve_connection<IO>(
     .await;
 }
 
+/// Counts a connection's calls in flight, for keepalive.
+struct ActiveCall(Arc<AtomicUsize>);
+
+impl ActiveCall {
+    fn new(active: Arc<AtomicUsize>) -> Self {
+        active.fetch_add(1, Ordering::Relaxed);
+        ActiveCall(active)
+    }
+}
+
+impl Drop for ActiveCall {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// When a connection last read anything, as an offset from when it opened.
+struct LastRead {
+    opened: Instant,
+    micros: AtomicU64,
+}
+
+impl LastRead {
+    fn new() -> Self {
+        LastRead {
+            opened: Instant::now(),
+            micros: AtomicU64::new(0),
+        }
+    }
+
+    fn now(&self) -> Duration {
+        self.opened.elapsed()
+    }
+
+    fn mark(&self) {
+        self.micros
+            .store(self.now().as_micros() as u64, Ordering::Relaxed);
+    }
+
+    fn last(&self) -> Duration {
+        Duration::from_micros(self.micros.load(Ordering::Relaxed))
+    }
+}
+
+/// The connection's IO, noting each read for keepalive.
+struct Watched<IO> {
+    io: IO,
+    reads: Arc<LastRead>,
+}
+
+impl<IO: AsyncRead + Unpin> AsyncRead for Watched<IO> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let polled = Pin::new(&mut self.io).poll_read(cx, buf);
+        if buf.filled().len() > before {
+            self.reads.mark();
+        }
+        polled
+    }
+}
+
+impl<IO: AsyncWrite + Unpin> AsyncWrite for Watched<IO> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.io).poll_write(cx, buf)
+    }
+
+    fn poll_write_vectored(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.io).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.io.is_write_vectored()
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.io).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.io).poll_shutdown(cx)
+    }
+}
+
 /// Resolves once the peer stops answering keepalive pings.
-async fn keepalive(ping_pong: Option<h2::PingPong>) {
-    let Some(mut ping_pong) = ping_pong else {
+async fn keepalive(
+    config: Keepalive,
+    ping_pong: Option<h2::PingPong>,
+    active: Arc<AtomicUsize>,
+    reads: Arc<LastRead>,
+) {
+    let (Some(time), Some(mut ping_pong)) = (config.time, ping_pong) else {
         return std::future::pending().await;
     };
+    let mut next = time;
     loop {
-        tokio::time::sleep(KEEPALIVE_INTERVAL).await;
-        let pong = tokio::time::timeout(KEEPALIVE_TIMEOUT, ping_pong.ping(h2::Ping::opaque()));
-        if !matches!(pong.await, Ok(Ok(_))) {
-            log::debug!("gRPC peer missed a keepalive ping; closing the connection");
-            return;
+        tokio::time::sleep_until((reads.opened + next).into()).await;
+        // Like grpc-core, ping only after the keepalive time passes without
+        // anything read, and an idle connection only when allowed.
+        let quiet_until = reads.last() + time;
+        if quiet_until > reads.now() {
+            next = quiet_until;
+            continue;
         }
+        if config.without_calls || active.load(Ordering::Relaxed) > 0 {
+            let sent = reads.now();
+            let pong = ping_pong.ping(h2::Ping::opaque());
+            tokio::pin!(pong);
+            let answered = match tokio::time::timeout(config.timeout, &mut pong).await {
+                Ok(result) => result.is_ok(),
+                // grpc-core gives a client that is still sending until its
+                // ping timeout to answer.
+                Err(_) if reads.last() > sent => matches!(
+                    tokio::time::timeout(PING_TIMEOUT.saturating_sub(config.timeout), pong).await,
+                    Ok(Ok(_))
+                ),
+                Err(_) => false,
+            };
+            if !answered {
+                log::debug!("gRPC peer missed a keepalive ping; closing the connection");
+                return;
+            }
+        }
+        next = reads.now() + time;
     }
 }
 

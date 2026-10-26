@@ -36,43 +36,61 @@ _AUTH_CONTEXT = {
 }
 
 # Options grpcio servers take that need no work here: the server never limits
-# client pings.
-_PING_OPTIONS = frozenset(
+# client pings, and grpc-core doesn't read grpc.max_message_length at all.
+_IGNORED_OPTIONS = frozenset(
     {
         "grpc.http2.min_ping_interval_without_data_ms",
         "grpc.http2.max_ping_strikes",
         "grpc.http2.max_pings_without_data",
-        "grpc.keepalive_permit_without_calls",
+        "grpc.max_message_length",
     }
 )
+# grpc-core's server defaults.
+_KEEPALIVE_DEFAULTS = {
+    "keepalive_time_ms": 7_200_000,
+    "keepalive_timeout_ms": 20_000,
+    "keepalive_permit_without_calls": False,
+}
 
 
 def _code(code: grpc.StatusCode) -> int:
     return code.value[0]
 
 
-def _limit(value: Any) -> int | None:
-    value = int(value)
+def _limit(value: int) -> int | None:
     return None if value < 0 else value
 
 
 def _parse_options(
     options: Iterable[tuple[str, Any]] | None,
-) -> tuple[int | None, int | None]:
+) -> tuple[int | None, int | None, dict[str, Any]]:
+    """Returns the receive and send limits and the keepalive arguments of
+    NativeGrpcFront."""
     receive: int | None = _DEFAULT_RECEIVE_LIMIT
     send: int | None = None
+    keepalive = dict(_KEEPALIVE_DEFAULTS)
     for key, value in options or ():
+        # grpc-core ignores a value that isn't an integer where it reads one.
+        integer = isinstance(value, int)
         if key == "grpc.max_receive_message_length":
-            receive = _limit(value)
+            if integer:
+                receive = _limit(value)
         elif key == "grpc.max_send_message_length":
-            send = _limit(value)
-        elif key in _PING_OPTIONS:
+            if integer:
+                send = _limit(value)
+        elif key in ("grpc.keepalive_time_ms", "grpc.keepalive_timeout_ms"):
+            if integer:
+                keepalive[key[len("grpc.") :]] = max(1, value)
+        elif key == "grpc.keepalive_permit_without_calls":
+            if integer:
+                keepalive["keepalive_permit_without_calls"] = bool(value)
+        elif key in _IGNORED_OPTIONS:
             pass
-        elif key == "grpc.so_reuseport" and not value:
+        elif key == "grpc.so_reuseport" and not (integer and value):
             pass
         else:
             raise ValueError(f"unsupported server option {key!r}")
-    return receive, send
+    return receive, send, keepalive
 
 
 def _split_handlers(
@@ -351,7 +369,9 @@ class Server(_Codec, grpc.Server):
         if compression not in (None, grpc.Compression.NoCompression):
             raise NotImplementedError("response compression isn't supported")
         self._options = list(options or ())
-        self._receive_limit, self._send_limit = _parse_options(self._options)
+        self._receive_limit, self._send_limit, self._keepalive = _parse_options(
+            self._options
+        )
         self._executor = thread_pool
         self._interceptors = tuple(interceptors or ())
         self._io_threads = io_threads
@@ -388,6 +408,7 @@ class Server(_Codec, grpc.Server):
                 io_threads=self._io_threads,
                 call_details=True,
                 delay_stream_headers=True,
+                **self._keepalive,
             )
         except OSError as exc:
             raise RuntimeError(f"Failed to bind to address {address}") from exc
