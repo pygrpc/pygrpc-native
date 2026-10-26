@@ -113,9 +113,11 @@ interceptors.
 ## Metrics
 
 With `metrics=True`, the front counts calls like gRFC A66's
-`grpc.server.call.started` and `grpc.server.call.duration`. It counts each
-call when it starts, and records its status and duration when the trailers go
-out. A call the client resets counts as CANCELLED, so one the client drops at
+`grpc.server.call.started`, `grpc.server.call.duration`,
+`grpc.server.call.sent_total_compressed_message_size` and
+`grpc.server.call.rcvd_total_compressed_message_size`. It counts each call
+when it starts, and records its status, duration and message bytes when the
+trailers go out. A call the client resets counts as CANCELLED, so one the client drops at
 its deadline can show up as CANCELLED or DEADLINE_EXCEEDED, depending on which
 side notices first. Calls to paths you didn't list count under `"other"`, so
 unknown paths can't add entries. Calls forwarded to the fallback aren't
@@ -127,12 +129,15 @@ you call it:
 {
     "start_time_unix_nano": 1761436800000000000,
     "bounds": [0.0, 1e-05, ..., 100.0],  # A66's latency buckets, in seconds
+    "size_bounds": [0, 1024, ..., 4294967296],  # A66's size buckets, in bytes
     "methods": {
         "/echo.Echo/Say": {
             "started": 1042,  # still running: started minus the counts
             "status": {
                 0: {"count": 1040, "sum": 0.21, "min": 0.00009, "max": 0.0031,
-                    "buckets": [0, 0, 0, 12, ...]},  # one more than bounds
+                    "buckets": [0, 0, 0, 12, ...],  # one more than bounds
+                    "sent": {"sum": 66560, "buckets": [0, 1040, 0, ...]},
+                    "rcvd": {"sum": 66560, "buckets": [0, 1040, 0, ...]}},
             },
         },
     },
@@ -146,3 +151,8 @@ histograms use the same layout, while Prometheus `le` buckets are cumulative,
 so add them up from the first one. Nothing resets: the totals count up from
 `start_time_unix_nano`. The status keys are gRPC status code numbers, with 0
 for OK. A66 labels statuses by name instead.
+
+`sent` and `rcvd` hold each call's total message bytes, without the 5-byte
+gRPC frame headers, in the same layout over `size_bounds`. A compressed
+request counts at its compressed size, as A66 asks. Responses aren't
+compressed.
