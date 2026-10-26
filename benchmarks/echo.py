@@ -7,7 +7,7 @@ pygrpc_native.server() and pygrpc_native.aio.server(), or native for the
 low-level API.
 
 DUR sets the seconds measured (default 5) and SIZE the payload bytes
-(default 64).
+(default 64). METRICS=1 turns on the native front's metrics.
 """
 
 import multiprocessing as mp
@@ -33,7 +33,9 @@ def serve(kind: str, port: int) -> None:
     if kind == "native":
         from pygrpc_native import EVENT_CALL, NativeGrpcFront
 
-        front = NativeGrpcFront(target, [(METHOD, False)])
+        # Only when asked, so the script still runs against older releases.
+        extra = {"metrics": True} if os.environ.get("METRICS") == "1" else {}
+        front = NativeGrpcFront(target, [(METHOD, False)], **extra)
         front.start()
         while (events := front.recv_batch(256)) is not None:
             for ev_kind, call_id, _, payload, _ in events:
