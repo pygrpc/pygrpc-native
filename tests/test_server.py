@@ -366,7 +366,7 @@ def test_stop_with_grace_finishes_running_calls(pb: tuple[Any, Any]) -> None:
 def test_unsupported_features_are_rejected(pb: tuple[Any, Any]) -> None:
     pool = futures.ThreadPoolExecutor(1)
     with pytest.raises(ValueError, match="unsupported server option"):
-        pygrpc_native.server(pool, options=[("grpc.keepalive_time_ms", 1000)])
+        pygrpc_native.server(pool, options=[("grpc.max_concurrent_streams", 10)])
     server = pygrpc_native.server(pool)
     with pytest.raises(NotImplementedError):
         server.add_secure_port("127.0.0.1:0", object())  # type: ignore[arg-type]

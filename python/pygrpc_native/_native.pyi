@@ -32,6 +32,9 @@ class NativeGrpcFront:
         bearer_token_sha256: Sequence[bytes] | None = None,
         unauthenticated_message: str = "Unauthenticated",
         metrics: bool = False,
+        keepalive_time_ms: int = 7_200_000,
+        keepalive_timeout_ms: int = 20_000,
+        keepalive_permit_without_calls: bool = True,
     ) -> None: ...
     @property
     def bound_port(self) -> int: ...

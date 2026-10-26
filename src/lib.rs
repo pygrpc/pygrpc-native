@@ -32,8 +32,8 @@ use tonic::metadata::{
 use tonic::{Code, Status};
 
 use server::{
-    accept_loop, AddMethodsError, Answer, BearerAuth, CallDetails, ClientKey, Event, Listener,
-    MetadataValue, Shared, CONNECTION_DRAIN_TIMEOUT,
+    accept_loop, AddMethodsError, Answer, BearerAuth, CallDetails, ClientKey, Event, Keepalive,
+    Listener, MetadataValue, Shared, CONNECTION_DRAIN_TIMEOUT,
 };
 
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -75,11 +75,19 @@ struct Running {
 ///     unauthenticated_message: The status message of those calls.
 ///     metrics: Count calls, their latency and message sizes per method and
 ///         status, for ``metrics()``. Recorded on the tokio threads, without the GIL.
+///     keepalive_time_ms: Ping a connection that has received nothing for
+///         this long, to check that the client is still there; 2147483647
+///         (INT_MAX, as in grpc-core) or more never pings.
+///     keepalive_timeout_ms: How long to wait for a ping's answer before
+///         closing the connection.
+///     keepalive_permit_without_calls: Also ping connections with no calls
+///         in flight. grpc-core servers don't.
 ///
 /// Raises:
 ///     OSError: If the address cannot be bound.
-///     ValueError: If ``client_key_metadata`` is not a valid metadata key, or
-///         ``bearer_token_sha256`` is empty or has a digest that isn't 32 bytes.
+///     ValueError: If ``client_key_metadata`` is not a valid metadata key,
+///         ``bearer_token_sha256`` is empty or has a digest that isn't 32 bytes,
+///         or a keepalive time is 0.
 #[pyclass(module = "pygrpc_native", frozen)]
 struct NativeGrpcFront {
     shared: Arc<Shared>,
@@ -102,6 +110,9 @@ impl NativeGrpcFront {
         bearer_token_sha256=None,
         unauthenticated_message="Unauthenticated",
         metrics=false,
+        keepalive_time_ms=7_200_000,
+        keepalive_timeout_ms=20_000,
+        keepalive_permit_without_calls=true,
     ))]
     // Python keyword arguments.
     #[allow(clippy::too_many_arguments)]
@@ -115,10 +126,24 @@ impl NativeGrpcFront {
         bearer_token_sha256: Option<Vec<Vec<u8>>>,
         unauthenticated_message: &str,
         metrics: bool,
+        keepalive_time_ms: u64,
+        keepalive_timeout_ms: u64,
+        keepalive_permit_without_calls: bool,
     ) -> PyResult<Self> {
         if io_threads == 0 {
             return Err(PyValueError::new_err("io_threads must be greater than 0"));
         }
+        if keepalive_time_ms == 0 || keepalive_timeout_ms == 0 {
+            return Err(PyValueError::new_err(
+                "keepalive_time_ms and keepalive_timeout_ms must be greater than 0",
+            ));
+        }
+        let keepalive = Keepalive {
+            time: (keepalive_time_ms < i32::MAX as u64)
+                .then(|| Duration::from_millis(keepalive_time_ms)),
+            timeout: Duration::from_millis(keepalive_timeout_ms),
+            without_calls: keepalive_permit_without_calls,
+        };
         if let Some(key) = &client_key_metadata {
             // Metadata keys arrive lowercased, so an uppercase key never matches.
             let valid =
@@ -177,6 +202,7 @@ impl NativeGrpcFront {
                 call_details,
                 delay_stream_headers,
                 bearer_auth,
+                keepalive,
                 metrics.then_some(io_threads),
             )),
             events,
