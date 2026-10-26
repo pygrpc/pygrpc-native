@@ -1,5 +1,6 @@
-"""The 0.1 API that existing users call. New parameters may be added after
-the existing ones with a default; nothing here may change or go away."""
+"""The API that existing users call: the 0.1 low-level API and the
+metrics() snapshot. New parameters and keys may be added; nothing here may
+change or go away."""
 
 import ast
 import inspect
@@ -118,3 +119,33 @@ def test_stub_matches_the_constructor() -> None:
         for p in inspect.signature(NativeGrpcFront).parameters.values()
     ]
     assert stubbed == actual
+
+
+def test_metrics_snapshot_keys() -> None:
+    front = NativeGrpcFront("127.0.0.1:0", [("/t.S/U", False)], metrics=True)
+    front.start()
+
+    def serve() -> None:
+        while (batch := front.recv_batch(16, 100)) is not None:
+            for kind, call_id, _, payload, _ in batch:
+                if kind == EVENT_CALL:
+                    front.respond(call_id, payload)
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{front.bound_port}") as channel:
+            channel.unary_unary("/t.S/U")(b"x", timeout=5)
+        for _ in range(100):
+            snapshot = front.metrics()
+            assert snapshot is not None
+            method = snapshot["methods"]["/t.S/U"]
+            if method["status"]:
+                break
+            threading.Event().wait(0.01)
+        assert {"start_time_unix_nano", "bounds", "methods"} <= snapshot.keys()
+        assert {"started", "status"} <= method.keys()
+        assert {"count", "sum", "min", "max", "buckets"} <= method["status"][0].keys()
+    finally:
+        front.close()
+        thread.join(10)
