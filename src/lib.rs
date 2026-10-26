@@ -73,8 +73,8 @@ struct Running {
 ///         one of them ends with UNAUTHENTICATED before it reaches Python or
 ///         the fallback.
 ///     unauthenticated_message: The status message of those calls.
-///     metrics: Count calls and their latency per method and status, for
-///         ``metrics()``. Recorded on the tokio threads, without the GIL.
+///     metrics: Count calls, their latency and message sizes per method and
+///         status, for ``metrics()``. Recorded on the tokio threads, without the GIL.
 ///
 /// Raises:
 ///     OSError: If the address cannot be bound.
@@ -408,14 +408,18 @@ impl NativeGrpcFront {
         self.shared.stream_sender(call_id).is_some()
     }
 
-    /// Call counts and latencies since the server was created, or None when
-    /// it was created without ``metrics``.
+    /// Call counts, latencies and message sizes since the server was created,
+    /// or None when it was created without ``metrics``.
     ///
     /// Returns ``{"start_time_unix_nano": int, "bounds": [float],
-    /// "methods": {path: {"started": int, "status": {code: {"count": int,
-    /// "sum": float, "min": float, "max": float, "buckets": [int]}}}}}``.
-    /// Times are in seconds. ``bounds`` are the upper bounds of the buckets,
-    /// with one more bucket for anything above the last. Paths that aren't
+    /// "size_bounds": [int], "methods": {path: {"started": int, "status":
+    /// {code: {"count": int, "sum": float, "min": float, "max": float,
+    /// "buckets": [int], "sent": {"sum": int, "buckets": [int]},
+    /// "rcvd": {"sum": int, "buckets": [int]}}}}}}``. Times are in seconds.
+    /// ``bounds`` and ``size_bounds`` are the upper bounds of the buckets,
+    /// with one more bucket for anything above the last. ``sent`` and
+    /// ``rcvd`` count each call's message bytes, without the gRPC frame
+    /// headers; a compressed request counts at its compressed size. Paths that aren't
     /// registered are counted under ``"other"``, and calls forwarded to the
     /// fallback aren't counted. The totals of different methods are read one
     /// after another, not at a single instant.
@@ -428,6 +432,7 @@ impl NativeGrpcFront {
         let result = PyDict::new(py);
         result.set_item("start_time_unix_nano", shared.metrics_since())?;
         result.set_item("bounds", PyList::new(py, metrics::BOUNDS)?)?;
+        result.set_item("size_bounds", PyList::new(py, metrics::SIZE_BOUNDS)?)?;
         let methods = PyDict::new(py);
         for method in snapshot.unwrap_or_default() {
             let statuses = PyDict::new(py);
@@ -438,6 +443,12 @@ impl NativeGrpcFront {
                 entry.set_item("min", status.min)?;
                 entry.set_item("max", status.max)?;
                 entry.set_item("buckets", PyList::new(py, status.buckets)?)?;
+                for (key, sizes) in [("sent", status.sent), ("rcvd", status.rcvd)] {
+                    let item = PyDict::new(py);
+                    item.set_item("sum", sizes.sum)?;
+                    item.set_item("buckets", PyList::new(py, sizes.buckets)?)?;
+                    entry.set_item(key, item)?;
+                }
                 statuses.set_item(status.code, entry)?;
             }
             let entry = PyDict::new(py);

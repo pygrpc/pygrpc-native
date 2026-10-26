@@ -146,6 +146,9 @@ def test_metrics_snapshot_keys() -> None:
         assert {"start_time_unix_nano", "bounds", "methods"} <= snapshot.keys()
         assert {"started", "status"} <= method.keys()
         assert {"count", "sum", "min", "max", "buckets"} <= method["status"][0].keys()
+        assert "size_bounds" in snapshot
+        for key in ("sent", "rcvd"):
+            assert {"sum", "buckets"} <= method["status"][0][key].keys()
     finally:
         front.close()
         thread.join(10)
