@@ -30,6 +30,8 @@ use tonic::{Code, Status};
 use crate::metrics::{self, Metrics};
 
 const STREAM_READ_AHEAD: usize = 1;
+// The compressed flag and length in front of every gRPC message.
+const GRPC_HEADER_LEN: u64 = 5;
 // Enough to flush GOAWAY. grpcio clients keep an idle connection open after
 // it, and like grpcio's stop(grace=None) we do not wait for them.
 pub const CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
@@ -451,8 +453,10 @@ impl Fallback {
 }
 
 /// Passes message bytes through untouched; Python owns the protobuf codec.
-#[derive(Clone, Copy, Default)]
-struct BytesCodec;
+#[derive(Clone, Default)]
+struct BytesCodec {
+    sizes: Option<Arc<CallSizes>>,
+}
 
 impl Codec for BytesCodec {
     type Encode = Bytes;
@@ -461,11 +465,11 @@ impl Codec for BytesCodec {
     type Decoder = BytesCodec;
 
     fn encoder(&mut self) -> Self::Encoder {
-        BytesCodec
+        self.clone()
     }
 
     fn decoder(&mut self) -> Self::Decoder {
-        BytesCodec
+        self.clone()
     }
 }
 
@@ -474,6 +478,10 @@ impl Encoder for BytesCodec {
     type Error = Status;
 
     fn encode(&mut self, item: Bytes, dst: &mut EncodeBuf<'_>) -> Result<(), Status> {
+        // Responses aren't compressed, so this is the size on the wire.
+        if let Some(sizes) = &self.sizes {
+            sizes.sent.fetch_add(item.len() as u64, Ordering::Relaxed);
+        }
         dst.put(item);
         Ok(())
     }
@@ -774,9 +782,9 @@ impl ServerStreamingService<Bytes> for StreamingCall {
     }
 }
 
-fn grpc() -> Grpc<BytesCodec> {
+fn grpc(sizes: Option<Arc<CallSizes>>) -> Grpc<BytesCodec> {
     // Like grpcio servers: take gzip requests, but answer uncompressed.
-    Grpc::new(BytesCodec)
+    Grpc::new(BytesCodec { sizes })
         .accept_compressed(CompressionEncoding::Gzip)
         .max_decoding_message_size(usize::MAX)
         .max_encoding_message_size(usize::MAX)
@@ -825,6 +833,7 @@ async fn route(
     // The deadline runs from when the headers arrive, so it also covers a
     // request body that is slow to come.
     let deadline = call_timeout(request.headers()).map(|t| tokio::time::Instant::now() + t);
+    let sizes = call.map(|call| call.sizes.clone());
     let response = async {
         if streaming {
             let call = StreamingCall {
@@ -833,7 +842,7 @@ async fn route(
                 peer,
                 deadline,
             };
-            grpc().server_streaming(call, request).await
+            grpc(sizes).server_streaming(call, request).await
         } else {
             let call = UnaryCall {
                 shared,
@@ -841,7 +850,7 @@ async fn route(
                 peer,
                 deadline,
             };
-            with_extra_trailers(grpc().unary(call, request).await)
+            with_extra_trailers(grpc(sizes).unary(call, request).await)
         }
     };
     match deadline {
@@ -958,14 +967,15 @@ async fn serve_stream(
     request: http::Request<h2::RecvStream>,
     mut respond: h2::server::SendResponse<Bytes>,
 ) {
-    let request = request.map(|recv| RequestBody {
-        recv,
-        data_done: false,
-    });
     // Dropped without finish() (client reset, shutdown), it records CANCELLED.
     let call = shared
         .metrics_enabled()
         .then(|| CallMetrics::new(shared.clone()));
+    let request = request.map(|recv| RequestBody {
+        recv,
+        data_done: false,
+        sizes: call.as_ref().map(|call| call.sizes.clone()),
+    });
     let route = route(shared, peer, fallback, request, call.as_ref());
     tokio::pin!(route);
     // A reset (cancel, deadline on the client) drops the call.
@@ -1010,6 +1020,15 @@ struct CallMetrics {
     since: Instant,
     slot: AtomicUsize,
     done: AtomicBool,
+    sizes: Arc<CallSizes>,
+}
+
+/// Message bytes of one call, counted as they go through.
+#[derive(Default)]
+struct CallSizes {
+    sent: AtomicU64,
+    // DATA bytes, so a compressed request counts at its compressed size.
+    received: AtomicU64,
 }
 
 impl CallMetrics {
@@ -1021,6 +1040,7 @@ impl CallMetrics {
             since: Instant::now(),
             slot: AtomicUsize::new(Self::NO_SLOT),
             done: AtomicBool::new(false),
+            sizes: Arc::default(),
         }
     }
 
@@ -1041,7 +1061,12 @@ impl CallMetrics {
             return;
         }
         if let Some(metrics) = self.shared.metrics() {
-            metrics.finished(slot, code, self.since.elapsed());
+            let sent = self.sizes.sent.load(Ordering::Relaxed);
+            // The natively served methods take one request message; drop
+            // its frame header.
+            let received = self.sizes.received.load(Ordering::Relaxed);
+            let rcvd = received.saturating_sub(GRPC_HEADER_LEN);
+            metrics.finished(slot, code, self.since.elapsed(), sent, rcvd);
         }
     }
 }
@@ -1190,6 +1215,7 @@ impl http_body::Body for TrailersBody {
 pub(crate) struct RequestBody {
     recv: h2::RecvStream,
     data_done: bool,
+    sizes: Option<Arc<CallSizes>>,
 }
 
 impl http_body::Body for RequestBody {
@@ -1204,6 +1230,11 @@ impl http_body::Body for RequestBody {
             match self.recv.poll_data(cx) {
                 Poll::Ready(Some(Ok(data))) => {
                     let _ = self.recv.flow_control().release_capacity(data.len());
+                    if let Some(sizes) = &self.sizes {
+                        sizes
+                            .received
+                            .fetch_add(data.len() as u64, Ordering::Relaxed);
+                    }
                     return Poll::Ready(Some(Ok(Frame::data(data))));
                 }
                 Poll::Ready(Some(Err(err))) => return Poll::Ready(Some(Err(err))),

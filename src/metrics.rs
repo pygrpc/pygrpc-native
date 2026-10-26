@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-//! Per-method call counts and latencies, recorded on the tokio threads.
+//! Per-method call counts, latencies and message sizes, recorded on the tokio
+//! threads.
 //!
 //! Each thread records into its own shard, so a call costs a few atomic adds
 //! on cache lines no other thread writes. A snapshot sums the shards.
@@ -16,6 +17,12 @@ pub const BOUNDS: [f64; 41] = [
     0.2, 0.25, 0.3, 0.4, 0.5, 0.65, 0.8, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0,
 ];
 const BUCKETS: usize = BOUNDS.len() + 1;
+/// gRFC A66's default size buckets, in bytes.
+pub const SIZE_BOUNDS: [u64; 14] = [
+    0, 1024, 2048, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216, 67108864, 268435456,
+    1073741824, 4294967296,
+];
+const SIZE_BUCKETS: usize = SIZE_BOUNDS.len() + 1;
 const CODES: usize = 17;
 const UNKNOWN: usize = 2;
 const PER_LINE: usize = 16;
@@ -40,6 +47,13 @@ struct Histogram {
     sum_ns: AtomicU64,
     min_ns: AtomicU64,
     max_ns: AtomicU64,
+    sent: Sizes,
+    rcvd: Sizes,
+}
+
+struct Sizes {
+    buckets: [AtomicU64; SIZE_BUCKETS],
+    sum: AtomicU64,
 }
 
 impl Histogram {
@@ -49,6 +63,30 @@ impl Histogram {
             sum_ns: AtomicU64::new(0),
             min_ns: AtomicU64::new(u64::MAX),
             max_ns: AtomicU64::new(0),
+            sent: Sizes::new(),
+            rcvd: Sizes::new(),
+        }
+    }
+}
+
+impl Sizes {
+    fn new() -> Self {
+        Sizes {
+            buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            sum: AtomicU64::new(0),
+        }
+    }
+
+    fn record(&self, bytes: u64) {
+        self.sum.fetch_add(bytes, Ordering::Relaxed);
+        let bucket = SIZE_BOUNDS.partition_point(|bound| *bound < bytes);
+        self.buckets[bucket].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn add_to(&self, total: &mut SizeSnapshot) {
+        total.sum = total.sum.saturating_add(self.sum.load(Ordering::Relaxed));
+        for (total, bucket) in total.buckets.iter_mut().zip(&self.buckets) {
+            *total += bucket.load(Ordering::Relaxed);
         }
     }
 }
@@ -79,6 +117,23 @@ pub struct StatusSnapshot {
     pub min: f64,
     pub max: f64,
     pub buckets: Vec<u64>,
+    pub sent: SizeSnapshot,
+    pub rcvd: SizeSnapshot,
+}
+
+/// Message bytes per call, without the 5-byte gRPC frame headers.
+pub struct SizeSnapshot {
+    pub sum: u64,
+    pub buckets: Vec<u64>,
+}
+
+impl SizeSnapshot {
+    fn new() -> Self {
+        SizeSnapshot {
+            sum: 0,
+            buckets: vec![0; SIZE_BUCKETS],
+        }
+    }
 }
 
 impl Metrics {
@@ -126,7 +181,7 @@ impl Metrics {
         self.shard().started[slot / PER_LINE].0[slot % PER_LINE].fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn finished(&self, slot: usize, code: i32, elapsed: Duration) {
+    pub fn finished(&self, slot: usize, code: i32, elapsed: Duration, sent: u64, rcvd: u64) {
         let code = usize::try_from(code)
             .ok()
             .filter(|code| *code < CODES)
@@ -137,6 +192,8 @@ impl Metrics {
         histogram.sum_ns.fetch_add(ns, Ordering::Relaxed);
         histogram.min_ns.fetch_min(ns, Ordering::Relaxed);
         histogram.max_ns.fetch_max(ns, Ordering::Relaxed);
+        histogram.sent.record(sent);
+        histogram.rcvd.record(rcvd);
         // Release pairs with the snapshot's Acquire, so a snapshot that sees
         // this call finished also sees it started.
         let bucket = self.bounds_ns.partition_point(|bound| *bound < ns);
@@ -169,6 +226,7 @@ impl Metrics {
     fn status_snapshot(&self, slot: usize, code: usize) -> Option<StatusSnapshot> {
         let mut buckets = vec![0u64; BUCKETS];
         let (mut sum, mut min, mut max) = (0u64, u64::MAX, 0u64);
+        let (mut sent, mut rcvd) = (SizeSnapshot::new(), SizeSnapshot::new());
         let mut seen = false;
         for shard in self.shards.iter() {
             let Some(histogram) = shard.histograms[slot * CODES + code].get() else {
@@ -181,6 +239,8 @@ impl Metrics {
             sum = sum.saturating_add(histogram.sum_ns.load(Ordering::Relaxed));
             min = min.min(histogram.min_ns.load(Ordering::Relaxed));
             max = max.max(histogram.max_ns.load(Ordering::Relaxed));
+            histogram.sent.add_to(&mut sent);
+            histogram.rcvd.add_to(&mut rcvd);
         }
         let count: u64 = buckets.iter().sum();
         if !seen || count == 0 {
@@ -193,6 +253,8 @@ impl Metrics {
             min: min as f64 / 1e9,
             max: max as f64 / 1e9,
             buckets,
+            sent,
+            rcvd,
         })
     }
 }
@@ -213,9 +275,9 @@ mod tests {
     fn buckets_are_upper_inclusive() {
         let metrics = Metrics::new(vec!["/t.S/U".into()], 1);
         metrics.started(0);
-        metrics.finished(0, 0, Duration::from_micros(10));
-        metrics.finished(0, 0, Duration::from_nanos(10_001));
-        metrics.finished(0, 0, Duration::from_secs(200));
+        metrics.finished(0, 0, Duration::from_micros(10), 0, 1024);
+        metrics.finished(0, 0, Duration::from_nanos(10_001), 1025, 0);
+        metrics.finished(0, 0, Duration::from_secs(200), 1 << 33, 0);
         let snapshot = metrics.snapshot();
         let ok = &snapshot[0].statuses[0];
         assert_eq!(ok.count, 3);
@@ -224,6 +286,12 @@ mod tests {
         assert_eq!(ok.buckets[BUCKETS - 1], 1);
         assert_eq!(ok.min, 1e-5);
         assert_eq!(ok.max, 200.0);
+        assert_eq!(ok.sent.sum, 1025 + (1 << 33));
+        assert_eq!(ok.sent.buckets[0], 1);
+        assert_eq!(ok.sent.buckets[2], 1);
+        assert_eq!(ok.sent.buckets[SIZE_BUCKETS - 1], 1);
+        assert_eq!(ok.rcvd.buckets[0], 2);
+        assert_eq!(ok.rcvd.buckets[1], 1);
     }
 
     /// cargo test --release --lib record_cost -- --ignored --nocapture
@@ -244,6 +312,8 @@ mod tests {
                                 0,
                                 0,
                                 since.elapsed() + Duration::from_nanos(i % 4096),
+                                i % 8192,
+                                64,
                             );
                         }
                     });
@@ -260,7 +330,7 @@ mod tests {
         let other = metrics.slot(None);
         assert_eq!(metrics.slot(Some(7)), other);
         metrics.started(other);
-        metrics.finished(other, 99, Duration::ZERO);
+        metrics.finished(other, 99, Duration::ZERO, 0, 0);
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot[1].name, None);
         assert_eq!(snapshot[1].started, 1);
