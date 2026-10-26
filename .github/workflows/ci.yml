@@ -48,6 +48,8 @@ jobs:
       - name: Build and install
         run: |
           python -m pip install maturin pytest grpcio grpcio-tools grpcio-health-checking grpcio-reflection uvloop
+          # Interceptor libraries that downstream servers use, for tests/test_downstream.py.
+          python -m pip install grpc-interceptor opentelemetry-instrumentation-grpc
           maturin build --release --locked --out dist
           python -m pip install dist/*.whl
       - run: pytest -q tests
