@@ -117,7 +117,7 @@ pass the serialized reply to `respond`.
 
 ## API
 
-`NativeGrpcFront(target, methods, io_threads=2, client_key_metadata=None, call_details=False, delay_stream_headers=False, bearer_token_sha256=None, unauthenticated_message="Unauthenticated")`
+`NativeGrpcFront(target, methods, io_threads=2, client_key_metadata=None, call_details=False, delay_stream_headers=False, bearer_token_sha256=None, unauthenticated_message="Unauthenticated", metrics=False)`
 binds `host:port` (every address the host resolves to), `unix:path` or
 `unix:///path`. Port 0 picks a free port. `methods` lists
 `(path, server_streaming)` pairs, where a path is `/package.Service/Method`
@@ -139,6 +139,7 @@ before `start()`, so the port can be bound before the methods are known.
 | `stream_send_initial_metadata(call_id, metadata)` | send a held-back stream's headers now |
 | `stream_end(call_id, trailing_metadata=None)` | finish a stream with OK; a stream cut short by `close()` ends with UNAVAILABLE |
 | `stream_open(call_id)` | whether the client is still reading a stream |
+| `metrics()` | call counts and latencies per method and status; `None` without `metrics=True` |
 | `close()` | stop without waiting for calls in flight; their clients get UNAVAILABLE |
 
 `recv_batch` returns `(kind, call_id, method_id, payload, client_key)`
@@ -187,6 +188,34 @@ front = NativeGrpcFront(
 `set_fallback` lets one port serve methods you don't list: run a regular
 `grpc.Server` on a Unix socket and its methods are proxied there, with its
 interceptors.
+
+With `metrics=True`, the front counts every call it serves the way gRFC A66's
+`grpc.server.call.started` and `grpc.server.call.duration` do: per method, and
+per method and status once the trailers go out. A call the client resets
+counts as CANCELLED. Paths you don't list count under `"other"`, so unknown
+paths can't add entries, and calls forwarded to the fallback are left to the
+fallback server. Each tokio thread records into its own counters, which costs
+about 70 ns per call, and `metrics()` adds them up when you read them:
+
+```python
+{
+    "start_time_unix_nano": 1761436800000000000,
+    "bounds": [0.0, 1e-05, ..., 100.0],  # A66's latency buckets, in seconds
+    "methods": {
+        "/echo.Echo/Say": {
+            "started": 1042,  # still running: started minus the counts
+            "status": {
+                0: {"count": 1040, "sum": 0.21, "min": 0.00009, "max": 0.0031,
+                    "buckets": [0, 0, 0, 12, ...]},  # one more than bounds
+            },
+        },
+    },
+}
+```
+
+The totals keep growing from `start_time_unix_nano`, as a cumulative
+OpenTelemetry histogram or a Prometheus histogram does, so an exporter can
+pass them on as they are.
 
 ## Compatibility
 

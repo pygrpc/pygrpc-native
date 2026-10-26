@@ -1,4 +1,5 @@
 from collections.abc import Sequence
+from typing import Any
 
 Metadata = Sequence[tuple[str, str | bytes]]
 
@@ -30,6 +31,7 @@ class NativeGrpcFront:
         delay_stream_headers: bool = False,
         bearer_token_sha256: Sequence[bytes] | None = None,
         unauthenticated_message: str = "Unauthenticated",
+        metrics: bool = False,
     ) -> None: ...
     @property
     def bound_port(self) -> int: ...
@@ -65,4 +67,5 @@ class NativeGrpcFront:
         self, call_id: int, trailing_metadata: Metadata | None = None
     ) -> None: ...
     def stream_open(self, call_id: int) -> bool: ...
+    def metrics(self) -> dict[str, Any] | None: ...
     def close(self) -> None: ...

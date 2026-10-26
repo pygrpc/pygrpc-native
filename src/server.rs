@@ -12,7 +12,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::{Buf, BufMut, Bytes};
 use futures_core::Stream;
@@ -26,6 +26,8 @@ use tokio::sync::{mpsc, oneshot, watch, Notify};
 use tonic::codec::{Codec, CompressionEncoding, DecodeBuf, Decoder, EncodeBuf, Encoder};
 use tonic::server::{Grpc, ServerStreamingService, UnaryService};
 use tonic::{Code, Status};
+
+use crate::metrics::{self, Metrics};
 
 const STREAM_READ_AHEAD: usize = 1;
 // Enough to flush GOAWAY. grpcio clients keep an idle connection open after
@@ -182,6 +184,10 @@ pub struct Shared {
     call_details: bool,
     delay_stream_headers: bool,
     bearer_auth: Option<BearerAuth>,
+    // Shard count when metrics are on; the metrics are built at start().
+    metrics_shards: Option<usize>,
+    metrics: OnceLock<Metrics>,
+    metrics_since: u64,
 }
 
 impl Shared {
@@ -192,6 +198,7 @@ impl Shared {
         call_details: bool,
         delay_stream_headers: bool,
         bearer_auth: Option<BearerAuth>,
+        metrics_shards: Option<usize>,
     ) -> Self {
         Shared {
             pending_methods: Mutex::new(methods),
@@ -208,6 +215,9 @@ impl Shared {
             call_details,
             delay_stream_headers,
             bearer_auth,
+            metrics_shards,
+            metrics: OnceLock::new(),
+            metrics_since: metrics::unix_nanos(),
         }
     }
 
@@ -234,6 +244,23 @@ impl Shared {
             .map(|(i, (path, streaming))| (path.clone(), (i as u32, *streaming)))
             .collect();
         let _ = self.methods.set(methods);
+        if let Some(shards) = self.metrics_shards {
+            let names = pending.iter().map(|(path, _)| path.clone()).collect();
+            let _ = self.metrics.set(Metrics::new(names, shards));
+        }
+    }
+
+    pub fn metrics_enabled(&self) -> bool {
+        self.metrics_shards.is_some()
+    }
+
+    /// None until start(), or when metrics are off.
+    pub fn metrics(&self) -> Option<&Metrics> {
+        self.metrics.get()
+    }
+
+    pub fn metrics_since(&self) -> u64 {
+        self.metrics_since
     }
 
     pub fn set_fallback(&self, path: PathBuf) -> bool {
@@ -760,24 +787,41 @@ async fn route(
     peer: Arc<str>,
     fallback: Arc<Fallback>,
     request: http::Request<RequestBody>,
+    call: Option<&CallMetrics>,
 ) -> http::Response<tonic::body::Body> {
+    let lookup = |request: &http::Request<RequestBody>| {
+        shared
+            .methods
+            .get()
+            .and_then(|methods| methods.get(request.uri().path()))
+            .copied()
+    };
     // Before the method lookup, so callers without a token can't tell which
     // methods exist, and before the fallback, so it is covered too.
     if let Some(auth) = &shared.bearer_auth {
         if !auth.accepts(request.headers()) {
+            if let Some(call) = call {
+                call.start(lookup(&request).map(|(id, _)| id));
+            }
             return Status::unauthenticated(auth.message.clone()).into_http();
         }
     }
-    let method = shared
-        .methods
-        .get()
-        .and_then(|methods| methods.get(request.uri().path()));
-    let Some(&(method_id, streaming)) = method else {
+    let method = lookup(&request);
+    let Some((method_id, streaming)) = method else {
         return match shared.fallback.get() {
+            // The fallback server counts these calls itself.
             Some(path) => fallback.forward(path, request).await,
-            None => Status::new(Code::Unimplemented, "Method not found!").into_http(),
+            None => {
+                if let Some(call) = call {
+                    call.start(None);
+                }
+                Status::new(Code::Unimplemented, "Method not found!").into_http()
+            }
         };
     };
+    if let Some(call) = call {
+        call.start(Some(method_id));
+    }
     // The deadline runs from when the headers arrive, so it also covers a
     // request body that is slow to come.
     let deadline = call_timeout(request.headers()).map(|t| tokio::time::Instant::now() + t);
@@ -918,7 +962,11 @@ async fn serve_stream(
         recv,
         data_done: false,
     });
-    let route = route(shared, peer, fallback, request);
+    // Dropped without finish() (client reset, shutdown), it records CANCELLED.
+    let call = shared
+        .metrics_enabled()
+        .then(|| CallMetrics::new(shared.clone()));
+    let route = route(shared, peer, fallback, request, call.as_ref());
     tokio::pin!(route);
     // A reset (cancel, deadline on the client) drops the call.
     let response = poll_fn(|cx| {
@@ -933,18 +981,93 @@ async fn serve_stream(
     };
     let (parts, body) = response.into_parts();
     let end_of_stream = body.is_end_stream();
+    // A trailers-only response carries its status in the headers.
+    let code = match &call {
+        Some(_) if end_of_stream => grpc_status(&parts.headers),
+        _ => Code::Ok as i32,
+    };
     let Ok(mut send) = respond.send_response(http::Response::from_parts(parts, ()), end_of_stream)
     else {
         return;
     };
-    if !end_of_stream {
-        send_body(&mut send, body).await;
+    let code = if end_of_stream {
+        code
+    } else {
+        match send_body(&mut send, body, call.is_some()).await {
+            Some(code) => code,
+            None => return,
+        }
+    };
+    if let Some(call) = &call {
+        call.finish(code);
     }
 }
 
-/// Send a response body within HTTP/2 flow control. Returns early when the
+/// Records one call when metrics are on: the start once the method is known,
+/// and the status and duration once it ends.
+struct CallMetrics {
+    shared: Arc<Shared>,
+    since: Instant,
+    slot: AtomicUsize,
+    done: AtomicBool,
+}
+
+impl CallMetrics {
+    const NO_SLOT: usize = usize::MAX;
+
+    fn new(shared: Arc<Shared>) -> Self {
+        CallMetrics {
+            shared,
+            since: Instant::now(),
+            slot: AtomicUsize::new(Self::NO_SLOT),
+            done: AtomicBool::new(false),
+        }
+    }
+
+    fn start(&self, method_id: Option<u32>) {
+        if let Some(metrics) = self.shared.metrics() {
+            let slot = metrics.slot(method_id);
+            metrics.started(slot);
+            self.slot.store(slot, Ordering::Relaxed);
+        }
+    }
+
+    fn finish(&self, code: i32) {
+        if self.done.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        let slot = self.slot.load(Ordering::Relaxed);
+        if slot == Self::NO_SLOT {
+            return;
+        }
+        if let Some(metrics) = self.shared.metrics() {
+            metrics.finished(slot, code, self.since.elapsed());
+        }
+    }
+}
+
+impl Drop for CallMetrics {
+    fn drop(&mut self) {
+        self.finish(Code::Cancelled as i32);
+    }
+}
+
+fn grpc_status(headers: &http::HeaderMap) -> i32 {
+    headers
+        .get("grpc-status")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(Code::Unknown as i32)
+}
+
+/// Send a response body within HTTP/2 flow control. Returns the call's status
+/// (read from the trailers only when `status` is set), or None when the
 /// client resets the stream, which drops the body.
-async fn send_body(send: &mut h2::SendStream<Bytes>, body: tonic::body::Body) {
+async fn send_body(
+    send: &mut h2::SendStream<Bytes>,
+    body: tonic::body::Body,
+    status: bool,
+) -> Option<i32> {
     tokio::pin!(body);
     loop {
         let frame = poll_fn(|cx| {
@@ -955,10 +1078,10 @@ async fn send_body(send: &mut h2::SendStream<Bytes>, body: tonic::body::Body) {
         })
         .await;
         let frame = match frame {
-            None => return,
+            None => return None,
             Some(None) => {
                 let _ = send.send_data(Bytes::new(), true);
-                return;
+                return Some(Code::Unknown as i32);
             }
             Some(Some(Err(err))) => {
                 // Only a forwarded response can fail here (the out-of-tree
@@ -971,7 +1094,7 @@ async fn send_body(send: &mut h2::SendStream<Bytes>, body: tonic::body::Body) {
                     }
                     Err(_) => send.send_reset(h2::Reason::INTERNAL_ERROR),
                 }
-                return;
+                return Some(Code::Unavailable as i32);
             }
             Some(Some(Ok(frame))) => frame,
         };
@@ -988,11 +1111,11 @@ async fn send_body(send: &mut h2::SendStream<Bytes>, body: tonic::body::Body) {
                     .await;
                     let granted = match capacity {
                         Some(Ok(granted)) => granted,
-                        _ => return,
+                        _ => return None,
                     };
                     let chunk = data.split_to(granted.min(data.len()));
                     if send.send_data(chunk, false).is_err() {
-                        return;
+                        return None;
                     }
                 }
                 continue;
@@ -1000,8 +1123,12 @@ async fn send_body(send: &mut h2::SendStream<Bytes>, body: tonic::body::Body) {
             Err(frame) => frame,
         };
         if let Ok(trailers) = frame.into_trailers() {
+            let code = match status {
+                true => grpc_status(&trailers),
+                false => Code::Ok as i32,
+            };
             let _ = send.send_trailers(trailers);
-            return;
+            return Some(code);
         }
     }
 }

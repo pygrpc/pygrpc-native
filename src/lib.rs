@@ -8,6 +8,7 @@
 //! Python still decodes the protobuf and runs the handler, so the wire format,
 //! the clients and the handlers stay exactly as they are.
 
+mod metrics;
 mod server;
 
 use std::net::ToSocketAddrs;
@@ -21,7 +22,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError};
 use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedBytes;
-use pyo3::types::{PyBytes, PyList, PyTuple};
+use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::watch;
@@ -72,6 +73,8 @@ struct Running {
 ///         one of them ends with UNAUTHENTICATED before it reaches Python or
 ///         the fallback.
 ///     unauthenticated_message: The status message of those calls.
+///     metrics: Count calls and their latency per method and status, for
+///         ``metrics()``. Recorded on the tokio threads, without the GIL.
 ///
 /// Raises:
 ///     OSError: If the address cannot be bound.
@@ -98,6 +101,7 @@ impl NativeGrpcFront {
         delay_stream_headers=false,
         bearer_token_sha256=None,
         unauthenticated_message="Unauthenticated",
+        metrics=false,
     ))]
     // Python keyword arguments.
     #[allow(clippy::too_many_arguments)]
@@ -110,6 +114,7 @@ impl NativeGrpcFront {
         delay_stream_headers: bool,
         bearer_token_sha256: Option<Vec<Vec<u8>>>,
         unauthenticated_message: &str,
+        metrics: bool,
     ) -> PyResult<Self> {
         if io_threads == 0 {
             return Err(PyValueError::new_err("io_threads must be greater than 0"));
@@ -172,6 +177,7 @@ impl NativeGrpcFront {
                 call_details,
                 delay_stream_headers,
                 bearer_auth,
+                metrics.then_some(io_threads),
             )),
             events,
             running: Mutex::new(Some(Running {
@@ -400,6 +406,47 @@ impl NativeGrpcFront {
     /// Whether a server-streaming call is still open.
     fn stream_open(&self, call_id: u64) -> bool {
         self.shared.stream_sender(call_id).is_some()
+    }
+
+    /// Call counts and latencies since the server was created, or None when
+    /// it was created without ``metrics``.
+    ///
+    /// Returns ``{"start_time_unix_nano": int, "bounds": [float],
+    /// "methods": {path: {"started": int, "status": {code: {"count": int,
+    /// "sum": float, "min": float, "max": float, "buckets": [int]}}}}}``.
+    /// Times are in seconds. ``bounds`` are the upper bounds of the buckets,
+    /// with one more bucket for anything above the last. Paths that aren't
+    /// registered are counted under ``"other"``, and calls forwarded to the
+    /// fallback aren't counted. The totals of different methods are read one
+    /// after another, not at a single instant.
+    fn metrics<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyDict>>> {
+        if !self.shared.metrics_enabled() {
+            return Ok(None);
+        }
+        let shared = &self.shared;
+        let snapshot = py.detach(|| shared.metrics().map(|metrics| metrics.snapshot()));
+        let result = PyDict::new(py);
+        result.set_item("start_time_unix_nano", shared.metrics_since())?;
+        result.set_item("bounds", PyList::new(py, metrics::BOUNDS)?)?;
+        let methods = PyDict::new(py);
+        for method in snapshot.unwrap_or_default() {
+            let statuses = PyDict::new(py);
+            for status in method.statuses {
+                let entry = PyDict::new(py);
+                entry.set_item("count", status.count)?;
+                entry.set_item("sum", status.sum)?;
+                entry.set_item("min", status.min)?;
+                entry.set_item("max", status.max)?;
+                entry.set_item("buckets", PyList::new(py, status.buckets)?)?;
+                statuses.set_item(status.code, entry)?;
+            }
+            let entry = PyDict::new(py);
+            entry.set_item("started", method.started)?;
+            entry.set_item("status", statuses)?;
+            methods.set_item(method.name.unwrap_or("other"), entry)?;
+        }
+        result.set_item("methods", methods)?;
+        Ok(Some(result))
     }
 
     /// Stop the server without waiting for calls in flight. Safe to call twice.
