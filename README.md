@@ -193,10 +193,11 @@ With `metrics=True`, the front counts every call it serves the way gRFC A66's
 `grpc.server.call.started` and `grpc.server.call.duration` do: per method, and
 per method and status once the trailers go out. A call the client resets
 counts as CANCELLED, so one the client gives up on at its deadline counts as
-CANCELLED or DEADLINE_EXCEEDED, whichever side notices first. Paths you don't list count under `"other"`, so unknown
-paths can't add entries, and calls forwarded to the fallback are left to the
-fallback server. Each tokio thread records into its own counters, which costs
-about 70 ns per call, and `metrics()` adds them up when you read them:
+CANCELLED or DEADLINE_EXCEEDED, whichever side notices first. Paths you don't
+list count under `"other"`, so unknown paths can't add entries, and calls
+forwarded to the fallback are left to the fallback server. Each tokio thread
+records into its own counters, which costs about 70 ns per call, and
+`metrics()` adds them up when you read them:
 
 ```python
 {
@@ -214,9 +215,15 @@ about 70 ns per call, and `metrics()` adds them up when you read them:
 }
 ```
 
-The totals keep growing from `start_time_unix_nano`, as a cumulative
-OpenTelemetry histogram or a Prometheus histogram does, so an exporter can
-pass them on as they are.
+Each bucket counts the calls that took longer than the bound before it and at
+most its own bound, so the buckets add up to `count`. That's how an
+OpenTelemetry explicit-bucket histogram lays them out. Prometheus `le` buckets
+are cumulative, so add the counts up from the first bucket. The status keys
+are gRPC status code numbers, with 0 for OK, where A66 records the code's
+name.
+
+The totals keep growing from `start_time_unix_nano`, like cumulative
+OpenTelemetry data or Prometheus counters and histograms.
 
 ## Compatibility
 
@@ -224,9 +231,10 @@ pygrpc-native follows semantic versioning, and the low-level API stays
 compatible within 0.x as well. `tests/test_api.py` pins the 0.1 names,
 signatures and event tuples of `NativeGrpcFront`: they won't change or go
 away, and new parameters only come after the existing ones, with a default.
-`server()` and `aio.server()` follow grpcio's API, and any difference from
-grpcio's behavior is a bug unless it is listed in this README. Changes are
-listed in [CHANGELOG.md](CHANGELOG.md).
+The keys `metrics()` returns won't be renamed or removed within 0.x either,
+though new ones may be added. `server()` and `aio.server()` follow grpcio's
+API, and any difference from grpcio's behavior is a bug unless it is listed in
+this README. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ## Limitations
 
