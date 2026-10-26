@@ -25,9 +25,11 @@ from pygrpc_native._server import (
     _Codec,
     _code,
     _fallback_socket,
+    _HandlerCallDetails,
     _Metadatum,
     _parse_options,
     _split_handlers,
+    _use_handler,
 )
 
 __all__ = ["Server", "server"]
@@ -41,13 +43,18 @@ class _Call:
     def __init__(
         self,
         call_id: int,
+        method: str,
         handler: grpc.RpcMethodHandler,
         metadata: tuple[tuple[str, str | bytes], ...],
         peer: str,
         time_remaining: float | None,
     ) -> None:
         self.call_id = call_id
+        self.method = method
         self.handler = handler
+        # Whether the front serves the method as a stream; an interceptor
+        # can swap the handler, but not this.
+        self.streaming = handler.response_streaming
         self.metadata = metadata
         self.peer = peer
         self.deadline = (
@@ -101,7 +108,7 @@ class _Context(aio.ServicerContext):
         if self._initial_sent:
             raise ValueError("Initial metadata no longer allowed!")
         self._initial_sent = True
-        if self._call.handler.response_streaming:
+        if self._call.streaming:
             front = self._server._front
             assert front is not None
             front.stream_send_initial_metadata(
@@ -205,8 +212,16 @@ class Server(_Codec, aio.Server):
         compression: grpc.Compression | None = None,
         io_threads: int = 2,
     ) -> None:
-        if interceptors:
-            raise NotImplementedError("interceptors aren't supported yet")
+        invalid = [
+            interceptor
+            for interceptor in interceptors or ()
+            if not isinstance(interceptor, aio.ServerInterceptor)
+        ]
+        if invalid:
+            raise ValueError(
+                "Interceptor must be ServerInterceptor, "
+                f"the following are invalid: {invalid}"
+            )
         if maximum_concurrent_rpcs is not None:
             raise NotImplementedError("maximum_concurrent_rpcs isn't supported yet")
         if compression not in (None, grpc.Compression.NoCompression):
@@ -214,13 +229,14 @@ class Server(_Codec, aio.Server):
         self._options = list(options or ())
         self._receive_limit, self._send_limit = _parse_options(self._options)
         self._executor = migration_thread_pool
+        self._interceptors = tuple(interceptors or ())
         self._io_threads = io_threads
         self._generic_handlers = list(handlers or ())
         self._registered: dict[str, grpc.RpcMethodHandler] = {}
         self._front: NativeGrpcFront | None = None
         self._fallback: aio.Server | None = None
         self._fallback_dir: str | None = None
-        self._table: list[grpc.RpcMethodHandler] = []
+        self._table: list[tuple[str, grpc.RpcMethodHandler]] = []
         self._calls: dict[int, _Call] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._started = False
@@ -274,7 +290,7 @@ class Server(_Codec, aio.Server):
         self._front.add_methods(
             [(path, native[path].response_streaming) for path in paths]
         )
-        self._table = [native[path] for path in paths]
+        self._table = [(path, native[path]) for path in paths]
         self._front.start()
         threading.Thread(
             target=self._dispatch, name="pygrpc-native-dispatch", daemon=True
@@ -287,7 +303,9 @@ class Server(_Codec, aio.Server):
     ) -> None:
         assert self._front is not None
         self._fallback_dir, path = _fallback_socket()
-        fallback = aio.server(self._executor, options=self._options)
+        fallback = aio.server(
+            self._executor, interceptors=self._interceptors, options=self._options
+        )
         fallback.add_generic_rpc_handlers(generic)
         for service, handlers in streamed.items():
             fallback.add_registered_method_handlers(service, handlers)
@@ -352,17 +370,20 @@ class Server(_Codec, aio.Server):
                     "Server is shutting down",
                 )
                 continue
-            call = _Call(call_id, self._table[method_id], *details)
+            method, handler = self._table[method_id]
+            call = _Call(call_id, method, handler, *details)
             self._calls[call_id] = call
             call.task = loop.create_task(self._run(call, payload))
 
     async def _run(self, call: _Call, payload: bytes) -> None:
         context = _Context(self, call)
         try:
+            if self._interceptors and not await self._intercept(call):
+                return
             ok, request = self._request(call, payload)
             if not ok:
                 return
-            if call.handler.response_streaming:
+            if call.streaming:
                 await self._run_stream(call, context, request)
             else:
                 await self._run_unary(call, context, request)
@@ -375,6 +396,35 @@ class Server(_Codec, aio.Server):
         finally:
             self._calls.pop(call.call_id, None)
             call.finish(context)
+
+    async def _intercept(self, call: _Call) -> bool:
+        """Runs the interceptors, which may replace the call's handler."""
+        front = self._front
+        assert front is not None
+        registered = call.handler
+        details = _HandlerCallDetails(
+            call.method,
+            tuple(_Metadatum(key, value) for key, value in call.metadata),
+        )
+
+        async def intercept_at(index: int, details: grpc.HandlerCallDetails) -> Any:
+            if index == len(self._interceptors):
+                return registered
+            return await self._interceptors[index].intercept_service(
+                lambda details: intercept_at(index + 1, details), details
+            )
+
+        try:
+            handler = await intercept_at(0, details)
+        except Exception as exc:
+            _LOGGER.exception("Unexpected error in interceptor: %s", exc)
+            front.fail(
+                call.call_id,
+                _code(grpc.StatusCode.UNKNOWN),
+                f"Unexpected {type(exc)}: {exc}",
+            )
+            return False
+        return _use_handler(front, call, handler)
 
     def _fail(self, call: _Call, context: _Context, details: str | None) -> None:
         code = context._code or grpc.StatusCode.UNKNOWN
@@ -396,7 +446,9 @@ class Server(_Codec, aio.Server):
             _LOGGER.exception("Unexpected error in RPC handler: %s", exc)
             self._fail(call, context, f"Unexpected {type(exc)}: {exc}")
 
-    async def _run_unary(self, call: _Call, context: _Context, request: Any) -> None:
+    async def _unary_response(
+        self, call: _Call, context: _Context, request: Any
+    ) -> tuple[bool, Any]:
         handler = call.handler.unary_unary
         try:
             if inspect.iscoroutinefunction(handler):
@@ -408,9 +460,15 @@ class Server(_Codec, aio.Server):
                 )
         except Exception as exc:
             self._failed(call, context, exc)
-            return
+            return False, None
         if context._code not in (None, grpc.StatusCode.OK):
             self._fail(call, context, None)
+            return False, None
+        return True, response
+
+    async def _run_unary(self, call: _Call, context: _Context, request: Any) -> None:
+        ok, response = await self._unary_response(call, context, request)
+        if not ok:
             return
         data = self._serialize(call, response)
         if data is not None:
@@ -424,6 +482,14 @@ class Server(_Codec, aio.Server):
             )
 
     async def _run_stream(self, call: _Call, context: _Context, request: Any) -> None:
+        if not call.handler.response_streaming:
+            # A unary handler from an interceptor answers with one message.
+            ok, response = await self._unary_response(call, context, request)
+            if ok and await self._send(call, context, response):
+                self._front.stream_end(  # type: ignore[union-attr]
+                    call.call_id, trailing_metadata=list(context._trailing_metadata)
+                )
+            return
         handler = call.handler.unary_stream
         try:
             if inspect.isasyncgenfunction(handler):

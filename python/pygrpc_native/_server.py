@@ -1,4 +1,5 @@
 import collections
+import contextvars
 import logging
 import os
 import shutil
@@ -17,6 +18,14 @@ from pygrpc_native._native import EVENT_CALL, EVENT_CANCEL, NativeGrpcFront
 _LOGGER = logging.getLogger(__name__)
 
 _Metadatum = collections.namedtuple("_Metadatum", ("key", "value"))
+
+
+class _HandlerCallDetails(
+    collections.namedtuple("_HandlerCallDetails", ("method", "invocation_metadata")),
+    grpc.HandlerCallDetails,
+):
+    pass
+
 
 _DEFAULT_RECEIVE_LIMIT = 4 * 1024 * 1024
 # grpcio reports this when the call has no deadline.
@@ -102,6 +111,29 @@ def _fallback_socket() -> tuple[str, str]:
     return directory, os.path.join(directory, "fallback.sock")
 
 
+def _use_handler(
+    front: NativeGrpcFront, call: Any, handler: grpc.RpcMethodHandler | None
+) -> bool:
+    """Sets the handler the interceptors returned, or fails the call as grpcio
+    does. A unary handler can answer a stream with one message, as
+    interceptors that reject every call often return."""
+    if handler is None:
+        front.fail(
+            call.call_id, _code(grpc.StatusCode.UNIMPLEMENTED), "Method not found!"
+        )
+        return False
+    if handler.request_streaming or (handler.response_streaming and not call.streaming):
+        _LOGGER.error(
+            "An interceptor returned a handler of another kind for %s", call.method
+        )
+        front.fail(
+            call.call_id, _code(grpc.StatusCode.INTERNAL), "Error in service handler!"
+        )
+        return False
+    call.handler = handler
+    return True
+
+
 class _Abort(Exception):
     pass
 
@@ -110,13 +142,18 @@ class _Call:
     def __init__(
         self,
         call_id: int,
+        method: str,
         handler: grpc.RpcMethodHandler,
         metadata: tuple[tuple[str, str | bytes], ...],
         peer: str,
         time_remaining: float | None,
     ) -> None:
         self.call_id = call_id
+        self.method = method
         self.handler = handler
+        # Whether the front serves the method as a stream; an interceptor
+        # can swap the handler, but not this.
+        self.streaming = handler.response_streaming
         self.metadata = metadata
         self.peer = peer
         self.deadline = (
@@ -191,7 +228,7 @@ class _Context(grpc.ServicerContext):
         if self._initial_sent:
             raise ValueError("Initial metadata no longer allowed!")
         self._initial_sent = True
-        if self._call.handler.response_streaming:
+        if self._call.streaming:
             self._front.stream_send_initial_metadata(
                 self._call.call_id, list(initial_metadata)
             )
@@ -309,8 +346,6 @@ class Server(_Codec, grpc.Server):
         compression: grpc.Compression | None = None,
         io_threads: int = 2,
     ) -> None:
-        if interceptors:
-            raise NotImplementedError("interceptors aren't supported yet")
         if maximum_concurrent_rpcs is not None:
             raise NotImplementedError("maximum_concurrent_rpcs isn't supported yet")
         if compression not in (None, grpc.Compression.NoCompression):
@@ -318,13 +353,14 @@ class Server(_Codec, grpc.Server):
         self._options = list(options or ())
         self._receive_limit, self._send_limit = _parse_options(self._options)
         self._executor = thread_pool
+        self._interceptors = tuple(interceptors or ())
         self._io_threads = io_threads
         self._generic_handlers = list(handlers or ())
         self._registered: dict[str, grpc.RpcMethodHandler] = {}
         self._front: NativeGrpcFront | None = None
         self._fallback: grpc.Server | None = None
         self._fallback_dir: str | None = None
-        self._table: list[grpc.RpcMethodHandler] = []
+        self._table: list[tuple[str, grpc.RpcMethodHandler]] = []
         self._calls: dict[int, _Call] = {}
         self._lock = threading.Lock()
         self._started = False
@@ -377,7 +413,7 @@ class Server(_Codec, grpc.Server):
             self._front.add_methods(
                 [(path, native[path].response_streaming) for path in paths]
             )
-            self._table = [native[path] for path in paths]
+            self._table = [(path, native[path]) for path in paths]
             self._front.start()
             self._started = True
         threading.Thread(
@@ -391,7 +427,9 @@ class Server(_Codec, grpc.Server):
     ) -> None:
         assert self._front is not None
         self._fallback_dir, path = _fallback_socket()
-        fallback = grpc.server(self._executor, options=self._options)
+        fallback = grpc.server(
+            self._executor, interceptors=self._interceptors, options=self._options
+        )
         fallback.add_generic_rpc_handlers(generic)
         for service, handlers in streamed.items():
             fallback.add_registered_method_handlers(service, handlers)
@@ -462,15 +500,13 @@ class Server(_Codec, grpc.Server):
                         and payload is not None
                         and details is not None
                     )
-                    handler = self._table[method_id]
-                    call = _Call(call_id, handler, *details)
+                    method, handler = self._table[method_id]
+                    call = _Call(call_id, method, handler, *details)
                     self._calls[call_id] = call
-                    run = (
-                        self._run_stream
-                        if handler.response_streaming
-                        else self._run_unary
-                    )
-                    self._executor.submit(run, call, payload)
+                    run = self._run_stream if call.streaming else self._run_unary
+                    # Each call gets its own context, which its interceptors
+                    # and handler share, as in grpcio.
+                    self._executor.submit(contextvars.Context().run, run, call, payload)
                 except Exception:
                     _LOGGER.exception("Error dispatching call %d", call_id)
                     self._calls.pop(call_id, None)
@@ -480,6 +516,37 @@ class Server(_Codec, grpc.Server):
                             _code(grpc.StatusCode.INTERNAL),
                             "Error dispatching call",
                         )
+
+    def _intercept(self, call: _Call) -> bool:
+        """Runs the interceptors, which may replace the call's handler."""
+        if not self._interceptors:
+            return True
+        front = self._front
+        assert front is not None
+        registered = call.handler
+        details = _HandlerCallDetails(
+            call.method,
+            tuple(_Metadatum(key, value) for key, value in call.metadata),
+        )
+
+        def intercept_at(index: int, details: grpc.HandlerCallDetails) -> Any:
+            if index == len(self._interceptors):
+                return registered
+            return self._interceptors[index].intercept_service(
+                lambda details: intercept_at(index + 1, details), details
+            )
+
+        try:
+            handler = intercept_at(0, details)
+        except Exception as exc:
+            _LOGGER.exception("Exception servicing handler: %s", exc)
+            front.fail(
+                call.call_id,
+                _code(grpc.StatusCode.UNKNOWN),
+                "Error in service handler!",
+            )
+            return False
+        return _use_handler(front, call, handler)
 
     def _fail(
         self, call: _Call, context: _Context, code: grpc.StatusCode, details: str
@@ -499,6 +566,8 @@ class Server(_Codec, grpc.Server):
 
     def _run_unary(self, call: _Call, payload: bytes) -> None:
         try:
+            if not self._intercept(call):
+                return
             ok, request = self._request(call, payload)
             if not ok:
                 return
@@ -539,12 +608,17 @@ class Server(_Codec, grpc.Server):
         assert front is not None
         responses = None
         try:
+            if not self._intercept(call):
+                return
             ok, request = self._request(call, payload)
             if not ok:
                 return
             context = _Context(front, call)
             try:
-                responses = call.handler.unary_stream(request, context)
+                if call.handler.response_streaming:
+                    responses = call.handler.unary_stream(request, context)
+                else:
+                    responses = iter((call.handler.unary_unary(request, context),))
                 for response in responses:
                     data = self._serialize(call, response)
                     if data is None:
