@@ -83,7 +83,9 @@ async def _deny_async_stream(
 
 def _rejecting(handler: grpc.RpcMethodHandler, is_aio: bool) -> Any:
     """A handler of the same kind that rejects the call without decoding it."""
-    unary, stream = (_deny_async, _deny_async_stream) if is_aio else (_deny, _deny_stream)
+    unary, stream = (
+        (_deny_async, _deny_async_stream) if is_aio else (_deny, _deny_stream)
+    )
     if handler.request_streaming and handler.response_streaming:
         return grpc.stream_stream_rpc_method_handler(stream)
     if handler.response_streaming:
@@ -306,3 +308,114 @@ def test_interceptors_run_in_order(pb: tuple[Any, Any]) -> None:
 def test_aio_rejects_sync_interceptors() -> None:
     with pytest.raises(ValueError, match="Interceptor must be ServerInterceptor"):
         pygrpc_native.aio.server(interceptors=[Auth(True)])
+
+
+def _unknown_method_results(port: int) -> dict[str, Any]:
+    results: dict[str, Any] = {}
+    with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+        for path in ("/i.S/Unary", "/i.S/Missing"):
+            for token in ("ok", "bad"):
+                try:
+                    results[f"{path} {token}"] = channel.unary_unary(path)(
+                        b"", metadata=[("authorization", token)], timeout=5
+                    )
+                except grpc.RpcError as error:
+                    results[f"{path} {token}"] = (error.code(), error.details())
+    return results
+
+
+def test_sync_interceptors_see_unknown_methods() -> None:
+    # Without streaming methods there would be no fallback server.
+    def unary(request: bytes, context: grpc.ServicerContext) -> bytes:
+        return USER.get().encode()
+
+    def results(factory: Any) -> dict[str, Any]:
+        server = factory(futures.ThreadPoolExecutor(2), interceptors=[Auth(False)])
+        server.add_registered_method_handlers(
+            "i.S", {"Unary": grpc.unary_unary_rpc_method_handler(unary)}
+        )
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        try:
+            return _unknown_method_results(port)
+        finally:
+            server.stop(None)
+
+    native = results(pygrpc_native.server)
+    assert native == results(grpc.server)
+    assert native["/i.S/Missing bad"] == DENIED
+    assert native["/i.S/Missing ok"] == NOT_FOUND
+
+
+def test_aio_interceptors_see_unknown_methods() -> None:
+    async def unary(request: bytes, context: aio.ServicerContext) -> bytes:
+        return USER.get().encode()
+
+    async def results(factory: Any) -> dict[str, Any]:
+        server = factory(interceptors=[AioAuth(False)])
+        server.add_registered_method_handlers(
+            "i.S", {"Unary": grpc.unary_unary_rpc_method_handler(unary)}
+        )
+        port = server.add_insecure_port("127.0.0.1:0")
+        await server.start()
+        try:
+            return await asyncio.get_running_loop().run_in_executor(
+                None, _unknown_method_results, port
+            )
+        finally:
+            await server.stop(None)
+
+    native = asyncio.run(results(pygrpc_native.aio.server))
+    assert native == asyncio.run(results(aio.server))
+    assert native["/i.S/Missing bad"] == DENIED
+    assert native["/i.S/Missing ok"] == NOT_FOUND
+
+
+class Replace(grpc.ServerInterceptor):
+    def __init__(self, handler: grpc.RpcMethodHandler) -> None:
+        self.handler = handler
+
+    def intercept_service(
+        self, continuation: Callable[..., Any], details: grpc.HandlerCallDetails
+    ) -> Any:
+        return self.handler
+
+
+def _replaced(factory: Any, handler: grpc.RpcMethodHandler, path: str) -> Any:
+    server = factory(futures.ThreadPoolExecutor(2), interceptors=[Replace(handler)])
+    server.add_registered_method_handlers(
+        "i.S",
+        {
+            "Unary": grpc.unary_unary_rpc_method_handler(lambda r, c: r),
+            "Stream": grpc.unary_stream_rpc_method_handler(lambda r, c: iter([r])),
+        },
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            if path.endswith("Stream"):
+                return list(channel.unary_stream(path)(b"x", timeout=5))
+            return channel.unary_unary(path)(b"x", timeout=5)
+    except grpc.RpcError as error:
+        return (error.code(), error.details())
+    finally:
+        server.stop(None)
+
+
+def test_unary_handler_for_a_stream_fails_like_grpcio() -> None:
+    def fail(request: bytes, context: grpc.ServicerContext) -> bytes:
+        raise ValueError("broken")
+
+    handler = grpc.unary_unary_rpc_method_handler(fail)
+    native = _replaced(pygrpc_native.server, handler, "/i.S/Stream")
+    assert native == _replaced(grpc.server, handler, "/i.S/Stream")
+    assert native == (grpc.StatusCode.UNKNOWN, "Exception calling application: broken")
+
+
+def test_streaming_request_handler_is_rejected() -> None:
+    handler = grpc.stream_unary_rpc_method_handler(lambda requests, c: b"")
+    assert _replaced(pygrpc_native.server, handler, "/i.S/Unary") == (
+        grpc.StatusCode.INTERNAL,
+        "Error in service handler!",
+    )
