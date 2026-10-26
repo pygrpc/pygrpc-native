@@ -6,7 +6,7 @@ version = "0.3.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "A gRPC server in Rust that hands calls to Python handlers in batches"
-repository = "https://github.com/theminjunchoi/pygrpc-native"
+repository = "https://github.com/pygrpc/pygrpc-native"
 # tonic 0.14 needs rustc 1.88.
 rust-version = "1.88"
 

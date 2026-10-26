@@ -109,7 +109,7 @@ threading.Thread(target=serve).start()
 ```
 
 Streaming, call details, response metadata, bearer tokens and metrics are
-covered in [docs/low-level-api.md](https://github.com/theminjunchoi/pygrpc-native/blob/main/docs/low-level-api.md).
+covered in [docs/low-level-api.md](https://github.com/pygrpc/pygrpc-native/blob/main/docs/low-level-api.md).
 
 ## Compatibility
 
@@ -140,7 +140,7 @@ this README. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 With an empty handler on an Apple M4 Pro, `pygrpc_native.server()` answers
 about 1.5x the calls per second of `grpc.server()` from one client thread and
 about 5x from 32. On a 40-vCPU Linux container the low-level API answered
-about 12x at 32 threads. See [benchmarks](https://github.com/theminjunchoi/pygrpc-native/blob/main/benchmarks/README.md) for the
+about 12x at 32 threads. See [benchmarks](https://github.com/pygrpc/pygrpc-native/blob/main/benchmarks/README.md) for the
 numbers and how they were measured.
 
 ## Contributing
