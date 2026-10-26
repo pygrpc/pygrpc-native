@@ -61,11 +61,20 @@ grpcio server on a Unix socket behind it. They work, but they aren't any
 faster, and `peer()` in them is the socket.
 
 Interceptors run as in grpcio, on the methods served here and on the fallback
-server. `maximum_concurrent_rpcs`, TLS, response compression, and server
-options other than the message size limits and client ping settings raise an
-error rather than being ignored. There's one known difference: if a unary
-handler calls `send_initial_metadata()` and then fails, the metadata goes out
-with the status, so the client sees it as trailing metadata.
+server. Of the server options, the message size limits and the keepalive
+settings (`grpc.keepalive_time_ms`, `grpc.keepalive_timeout_ms` and
+`grpc.keepalive_permit_without_calls`) work as in grpcio, the limits on client
+pings are accepted but not enforced, and what grpc-core ignores, such as
+`grpc.max_message_length` or a value that isn't an integer, is ignored here
+too. `maximum_concurrent_rpcs`, TLS, response compression and other options
+raise an error rather than being ignored.
+
+There are two known differences. If a unary handler calls
+`send_initial_metadata()` and then fails, the metadata goes out with the
+status, so the client sees it as trailing metadata. And a connection whose
+client doesn't answer a keepalive ping is closed after
+`grpc.keepalive_timeout_ms`, as gRPC's keepalive documentation describes,
+while grpcio waits for `grpc.http2.ping_timeout_ms`, a minute by default.
 
 `pygrpc_native.aio.server()` does the same for `grpc.aio.server()`:
 
@@ -84,7 +93,7 @@ Handlers run on the event loop that called `start()`, uvloop included.
 whose deadline passes gets `asyncio.CancelledError`, as in grpc.aio. Streams
 can yield from an async generator or call `context.write()`, and handlers
 that aren't coroutines run in `migration_thread_pool`. The fallback,
-the unsupported options and the unary metadata difference are the same as
+the unsupported options and the known differences are the same as
 for the sync server.
 
 ## Low-level API
@@ -131,6 +140,9 @@ this README. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
   `aio.server()` run grpcio interceptors instead.
 - Like grpc-core, binding a Unix socket path replaces any socket file
   already there.
+- The server never sets `SO_REUSEPORT`, so binding a port another server is
+  using fails, where grpcio's default lets both bind it. `grpc.so_reuseport`
+  set to 0 is accepted; other integers raise an error.
 - Per connection: at most 1024 concurrent streams and 16 KiB of request
   metadata. A connection that hasn't finished the HTTP/2 preface after 120 s
   is dropped.

@@ -38,7 +38,7 @@ pass the serialized reply to `respond`.
 
 ## Reference
 
-`NativeGrpcFront(target, methods, io_threads=2, client_key_metadata=None, call_details=False, delay_stream_headers=False, bearer_token_sha256=None, unauthenticated_message="Unauthenticated", metrics=False)`
+`NativeGrpcFront(target, methods, io_threads=2, client_key_metadata=None, call_details=False, delay_stream_headers=False, bearer_token_sha256=None, unauthenticated_message="Unauthenticated", metrics=False, keepalive_time_ms=7200000, keepalive_timeout_ms=20000, keepalive_permit_without_calls=True)`
 binds `host:port` (every address the host resolves to), `unix:path` or
 `unix:///path`. Port 0 picks a free port. `methods` lists
 `(path, server_streaming)` pairs, where a path is `/package.Service/Method`
@@ -105,6 +105,15 @@ front = NativeGrpcFront(
     bearer_token_sha256=[hashlib.sha256(key.encode()).digest() for key in keys],
 )
 ```
+
+Like grpc-core, the server pings a connection that has received nothing for
+`keepalive_time_ms` and closes it if the client doesn't answer within
+`keepalive_timeout_ms`, which is how it notices a client that went away
+without closing the connection. A client that is still sending gets up to a
+minute to answer. A `keepalive_time_ms` of 2147483647 (INT_MAX, as in
+grpc-core) or more turns the pings off. With `keepalive_permit_without_calls=False`, as grpc-core
+servers do by default, a connection is only pinged while it has calls in
+flight; `server()` and `aio.server()` default to that.
 
 `set_fallback` lets one port serve methods you don't list: run a regular
 `grpc.Server` on a Unix socket and its methods are proxied there, with its

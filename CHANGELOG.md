@@ -9,13 +9,26 @@ All notable changes are listed here. The project follows
 ### Added
 
 - `server()` and `aio.server()` take grpcio server interceptors.
+- `server()` and `aio.server()` take the `grpc.keepalive_time_ms`,
+  `grpc.keepalive_timeout_ms` and `grpc.keepalive_permit_without_calls`
+  options, and `NativeGrpcFront` the matching `keepalive_*` arguments.
+- `server()` and `aio.server()` accept options grpcio ignores:
+  `grpc.max_message_length`, which grpc-core doesn't read, and option values
+  that aren't integers, such as `("grpc.so_reuseport", "0")`.
 - `metrics()` also reports each call's sent and received message bytes,
   like gRFC A66's `grpc.server.call.sent_total_compressed_message_size` and
   `rcvd_total_compressed_message_size`, under the new keys `size_bounds`,
   `sent` and `rcvd`.
 
+### Changed
+
+- Like grpc-core, the keepalive ping now waits until a connection has
+  received nothing for the keepalive time, so busy connections aren't pinged.
+
 ### Fixed
 
+- `server()` and `aio.server()` ignore a message size limit that isn't an
+  integer, as grpcio does, instead of converting it.
 - grpcio clients can call a Unix socket server without setting
   `grpc.default_authority`. This uses a patched copy of the `http` crate
   until hyperium/http#836 is fixed upstream.
