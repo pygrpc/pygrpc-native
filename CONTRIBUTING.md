@@ -59,20 +59,22 @@ commit without it.
 ## What a PR needs to merge
 
 The DCO, lint, rust and python checks have to pass, and a PR needs one
-approving review with every review thread resolved. `main` keeps a linear
-history: PRs are squash-merged with the PR title as the commit title, and
-force pushes and branch deletion are blocked. Issues and PRs with no activity
+approving review with every review thread resolved. While the project has a
+single maintainer, the maintainer's own PRs are merged once the checks pass.
+`main` keeps a linear history: PRs are squash-merged with the PR title as the
+commit title, and force pushes and branch deletion are blocked. Issues and PRs with no activity
 for 60 days are marked stale and closed 30 days later.
 
 ## Releases
 
 Releases follow semantic versioning. Existing users call the low-level API
 directly, so `tests/test_api.py` pins its names, signatures and event tuples;
-change it only together with a breaking release.
+change it only together with a new major version.
 
 Before a release:
 
-1. Bump the version in `Cargo.toml`.
+1. Bump the version in `Cargo.toml` and move the changes into a new section
+   of `CHANGELOG.md`.
 2. Build the wheel and run the tests of known downstream projects against it.
 3. Push a `vX.Y.Z` tag. The release workflow builds the wheels and publishes
    them to PyPI.

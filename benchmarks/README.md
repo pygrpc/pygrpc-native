@@ -15,7 +15,8 @@ payload bytes. The server and the clients share the machine.
 
 Median of three runs, calls/s with the client CPU per call in brackets.
 
-Apple M4 Pro (14 cores), Python 3.12.13, grpcio 1.84.1, pygrpc-native main:
+Apple M4 Pro (14 cores), Python 3.12.13, grpcio 1.84.1, pygrpc-native 0.2.0
+(measured at #20):
 
 | server | 1x1 | 4x4 | 8x4 |
 |---|---|---|---|
