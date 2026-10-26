@@ -52,17 +52,19 @@ server.wait_for_termination()
 ```
 
 Status codes, error messages, metadata, deadlines, cancellation and
-`ServicerContext` behave as they do in grpcio. Unary and server-streaming
-methods are served natively on one insecure port. Everything else, such as
-client-streaming and bidirectional methods, server reflection or handlers
-added only with `add_generic_rpc_handlers`, is passed to a grpcio server on a
-Unix socket behind it, so it works but doesn't get faster, and `peer()` there
-is the socket. Interceptors, `maximum_concurrent_rpcs`, TLS, response
-compression and server options other than the message size limits and client
-ping settings raise an error instead of being ignored. One difference
-remains: a unary handler that calls `send_initial_metadata()` and then fails
-sends the metadata with the status instead of before it, so the client sees
-it as trailing metadata.
+`ServicerContext` behave as they do in grpcio.
+
+Unary and server-streaming methods are served natively on one insecure port.
+The rest, such as client-streaming and bidirectional methods, server
+reflection, or handlers added only with `add_generic_rpc_handlers`, go to a
+grpcio server on a Unix socket behind it. They work, but they aren't any
+faster, and `peer()` in them is the socket.
+
+Interceptors, `maximum_concurrent_rpcs`, TLS, response compression, and server
+options other than the message size limits and client ping settings raise an
+error rather than being ignored. There's one known difference: if a unary
+handler calls `send_initial_metadata()` and then fails, the metadata goes out
+with the status, so the client sees it as trailing metadata.
 
 `pygrpc_native.aio.server()` does the same for `grpc.aio.server()`:
 
@@ -189,15 +191,16 @@ front = NativeGrpcFront(
 `grpc.Server` on a Unix socket and its methods are proxied there, with its
 interceptors.
 
-With `metrics=True`, the front counts every call it serves the way gRFC A66's
-`grpc.server.call.started` and `grpc.server.call.duration` do: per method, and
-per method and status once the trailers go out. A call the client resets
-counts as CANCELLED, so one the client gives up on at its deadline counts as
-CANCELLED or DEADLINE_EXCEEDED, whichever side notices first. Paths you don't
-list count under `"other"`, so unknown paths can't add entries, and calls
-forwarded to the fallback are left to the fallback server. Each tokio thread
-records into its own counters, which costs about 70 ns per call, and
-`metrics()` adds them up when you read them:
+With `metrics=True`, the front counts calls like gRFC A66's
+`grpc.server.call.started` and `grpc.server.call.duration`. It counts each
+call when it starts, and records its status and duration when the trailers go
+out. A call the client resets counts as CANCELLED, so one the client drops at
+its deadline can show up as CANCELLED or DEADLINE_EXCEEDED, depending on which
+side notices first. Calls to paths you didn't list count under `"other"`, so
+unknown paths can't add entries. Calls forwarded to the fallback aren't
+counted here; the fallback server counts them. Each tokio thread keeps its own
+counters, which costs about 70 ns per call, and `metrics()` adds them up when
+you call it:
 
 ```python
 {
@@ -215,15 +218,13 @@ records into its own counters, which costs about 70 ns per call, and
 }
 ```
 
-Each bucket counts the calls that took longer than the bound before it and at
-most its own bound, so the buckets add up to `count`. That's how an
-OpenTelemetry explicit-bucket histogram lays them out. Prometheus `le` buckets
-are cumulative, so add the counts up from the first bucket. The status keys
-are gRPC status code numbers, with 0 for OK, where A66 records the code's
-name.
-
-The totals keep growing from `start_time_unix_nano`, like cumulative
-OpenTelemetry data or Prometheus counters and histograms.
+Each entry in `buckets` is the number of calls in that bucket, not a running
+total. A call goes in the first bucket whose bound is at least its duration,
+and the last bucket holds anything slower than the last bound. OpenTelemetry
+histograms use the same layout, while Prometheus `le` buckets are cumulative,
+so add them up from the first one. Nothing resets: the totals count up from
+`start_time_unix_nano`. The status keys are gRPC status code numbers, with 0
+for OK. A66 labels statuses by name instead.
 
 ## Compatibility
 
@@ -258,14 +259,6 @@ about 1.5x the calls per second of `grpc.server()` from one client thread and
 about 5x from 32. On a 40-vCPU Linux container the low-level API answered
 about 12x at 32 threads. See [benchmarks](benchmarks/README.md) for the
 numbers and how they were measured.
-
-## Tests
-
-```bash
-cargo test --locked --no-default-features
-maturin develop --release
-pytest tests
-```
 
 ## Contributing
 
