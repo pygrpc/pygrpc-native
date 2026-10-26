@@ -16,9 +16,9 @@ All notable changes are listed here. The project follows
   `NativeGrpcFront` a matching `max_concurrent_streams` argument.
 - `server()` and `aio.server()` accept options grpcio ignores: names
   grpc-core doesn't know or no longer reads, such as
-  `grpc.max_message_length` and `grpc.http2.min_time_between_pings_ms`,
-  `grpc.http2.max_frame_size`, which grpc-core's flow control overrides, and
-  option values that aren't integers, such as `("grpc.so_reuseport", "0")`.
+  `grpc.max_message_length` and `grpc.http2.min_time_between_pings_ms`;
+  `grpc.http2.max_frame_size`, which grpc-core's flow control overrides; and
+  values that aren't integers, such as `("grpc.so_reuseport", "0")`.
 - `metrics()` also reports each call's sent and received message bytes,
   like gRFC A66's `grpc.server.call.sent_total_compressed_message_size` and
   `rcvd_total_compressed_message_size`, under the new keys `size_bounds`,

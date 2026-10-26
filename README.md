@@ -67,11 +67,11 @@ settings (`grpc.keepalive_time_ms`, `grpc.keepalive_timeout_ms` and
 `grpc.keepalive_permit_without_calls`) and `grpc.max_concurrent_streams` work
 as in grpcio, and the limits on client pings are accepted but not enforced.
 What grpcio ignores is ignored here too: options grpc-core doesn't know or no
-longer reads, such as `grpc.max_message_length` or
-`grpc.http2.min_time_between_pings_ms`, `grpc.http2.max_frame_size`, which
-grpc-core's flow control overrides, and values that aren't integers. `maximum_concurrent_rpcs`, TLS, response
-compression and other options grpc-core knows raise an error rather than
-being ignored.
+longer reads, such as `grpc.max_message_length` and
+`grpc.http2.min_time_between_pings_ms`; `grpc.http2.max_frame_size`, which
+grpc-core's flow control overrides; and values that aren't integers.
+`maximum_concurrent_rpcs`, TLS, response compression and other options
+grpc-core knows raise an error rather than being ignored.
 
 There are two known differences. If a unary handler calls
 `send_initial_metadata()` and then fails, the metadata goes out with the
