@@ -8,6 +8,7 @@ All notable changes are listed here. The project follows
 
 ### Added
 
+- `server()` and `aio.server()` take grpcio server interceptors.
 - `metrics()` also reports each call's sent and received message bytes,
   like gRFC A66's `grpc.server.call.sent_total_compressed_message_size` and
   `rcvd_total_compressed_message_size`, under the new keys `size_bounds`,
