@@ -192,7 +192,8 @@ interceptors.
 With `metrics=True`, the front counts every call it serves the way gRFC A66's
 `grpc.server.call.started` and `grpc.server.call.duration` do: per method, and
 per method and status once the trailers go out. A call the client resets
-counts as CANCELLED. Paths you don't list count under `"other"`, so unknown
+counts as CANCELLED, so one the client gives up on at its deadline counts as
+CANCELLED or DEADLINE_EXCEEDED, whichever side notices first. Paths you don't list count under `"other"`, so unknown
 paths can't add entries, and calls forwarded to the fallback are left to the
 fallback server. Each tokio thread records into its own counters, which costs
 about 70 ns per call, and `metrics()` adds them up when you read them:

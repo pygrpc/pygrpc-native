@@ -90,10 +90,14 @@ def test_counts_calls_by_method_and_status() -> None:
     assert _counts(metrics, STREAM) == {0: 1}
     assert _counts(metrics, FAIL) == {grpc.StatusCode.NOT_FOUND.value[0]: 1}
     assert _counts(metrics, "other") == {grpc.StatusCode.UNIMPLEMENTED.value[0]: 1}
-    assert _counts(metrics, SLOW) == {
-        grpc.StatusCode.DEADLINE_EXCEEDED.value[0]: 1,
-        grpc.StatusCode.CANCELLED.value[0]: 1,
+    # The client resets the call at its deadline too, so the server can see
+    # either first.
+    slow = _counts(metrics, SLOW)
+    assert slow.keys() <= {
+        grpc.StatusCode.DEADLINE_EXCEEDED.value[0],
+        grpc.StatusCode.CANCELLED.value[0],
     }
+    assert sum(slow.values()) == 2
     ok = metrics["methods"][UNARY]["status"][0]
     assert sum(ok["buckets"]) == ok["count"] == 200
     assert len(ok["buckets"]) == len(metrics["bounds"]) + 1

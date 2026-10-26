@@ -1123,9 +1123,10 @@ async fn send_body(
             Err(frame) => frame,
         };
         if let Ok(trailers) = frame.into_trailers() {
-            let code = match status {
-                true => grpc_status(&trailers),
-                false => Code::Ok as i32,
+            let code = if status {
+                grpc_status(&trailers)
+            } else {
+                Code::Ok as i32
             };
             let _ = send.send_trailers(trailers);
             return Some(code);

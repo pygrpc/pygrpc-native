@@ -117,6 +117,8 @@ impl Metrics {
             }
             index
         });
+        // Threads of two fronts can land on the same shard; that only costs
+        // some contention.
         &self.shards[index % self.shards.len()]
     }
 
