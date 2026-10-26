@@ -104,6 +104,36 @@ def test_counts_calls_by_method_and_status() -> None:
     assert 0 < ok["min"] <= ok["sum"] / ok["count"] <= ok["max"]
 
 
+def test_counts_message_sizes() -> None:
+    with serving() as front:
+        with grpc.insecure_channel(f"127.0.0.1:{front.bound_port}") as channel:
+            unary = channel.unary_unary(UNARY)
+            assert unary(b"x" * 1000, timeout=5) == b"x" * 1000
+            big = bytes(100_000)
+            assert unary(big, timeout=5, compression=grpc.Compression.Gzip) == big
+            assert list(channel.unary_stream(STREAM)(b"y" * 3000, timeout=5))
+            with pytest.raises(grpc.RpcError):
+                channel.unary_unary(FAIL)(b"z" * 10, timeout=5)
+        metrics = _settled(front)
+    bounds = metrics["size_bounds"]
+    assert bounds[:3] == [0, 1024, 2048]
+
+    def sizes(method: str, code: int) -> tuple[dict[str, Any], dict[str, Any]]:
+        status = metrics["methods"][method]["status"][code]
+        return status["sent"], status["rcvd"]
+
+    sent, rcvd = sizes(UNARY, 0)
+    assert sent["sum"] == 1000 + 100_000
+    # The gzip request counts at its compressed size.
+    assert 1000 < rcvd["sum"] < 1000 + 1000
+    assert sent["buckets"][1] == 1 and rcvd["buckets"][1] == 2
+    assert len(sent["buckets"]) == len(bounds) + 1
+    sent, rcvd = sizes(STREAM, 0)
+    assert (sent["sum"], rcvd["sum"]) == (3000, 3000)
+    sent, rcvd = sizes(FAIL, grpc.StatusCode.NOT_FOUND.value[0])
+    assert (sent["sum"], rcvd["sum"]) == (0, 10)
+
+
 def test_rejected_calls_count_under_their_method() -> None:
     digest = hashlib.sha256(b"key").digest()
     with serving(bearer_token_sha256=[digest]) as front:
