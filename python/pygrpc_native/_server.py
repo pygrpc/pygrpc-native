@@ -407,7 +407,9 @@ class Server(_Codec, grpc.Server):
             native, streamed, generic = _split_handlers(
                 self._registered, self._generic_handlers
             )
-            if streamed or generic:
+            # Interceptors also see calls to unknown methods, as in grpcio, and
+            # only the fallback server can run them for those.
+            if streamed or generic or self._interceptors:
                 self._start_fallback(streamed, generic)
             paths = list(native)
             self._front.add_methods(
@@ -630,12 +632,14 @@ class Server(_Codec, grpc.Server):
                 self._fail(call, context, grpc.StatusCode.UNKNOWN, "RPC Aborted")
                 return
             except Exception as exc:
-                _LOGGER.exception("Exception iterating responses: %s", exc)
+                what = (
+                    "iterating responses"
+                    if call.handler.response_streaming
+                    else "calling application"
+                )
+                _LOGGER.exception("Exception %s: %s", what, exc)
                 self._fail(
-                    call,
-                    context,
-                    grpc.StatusCode.UNKNOWN,
-                    f"Exception iterating responses: {exc}",
+                    call, context, grpc.StatusCode.UNKNOWN, f"Exception {what}: {exc}"
                 )
                 return
             if context._code not in (None, grpc.StatusCode.OK):

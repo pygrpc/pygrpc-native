@@ -284,7 +284,9 @@ class Server(_Codec, aio.Server):
         native, streamed, generic = _split_handlers(
             self._registered, self._generic_handlers
         )
-        if streamed or generic:
+        # Interceptors also see calls to unknown methods, as in grpcio, and
+        # only the fallback server can run them for those.
+        if streamed or generic or self._interceptors:
             await self._start_fallback(streamed, generic)
         paths = list(native)
         self._front.add_methods(
