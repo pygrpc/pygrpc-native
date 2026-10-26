@@ -4,6 +4,14 @@ All notable changes are listed here. The project follows
 [semantic versioning](https://semver.org); see
 [Compatibility](README.md#compatibility) for what that covers.
 
+## Unreleased
+
+### Fixed
+
+- grpcio clients can call a Unix socket server without setting
+  `grpc.default_authority`. This uses a patched copy of the `http` crate
+  until hyperium/http#836 is fixed upstream.
+
 ## 0.3.0 (2026-10-26)
 
 Everything here is an addition, so code written for 0.1 and 0.2 keeps working.

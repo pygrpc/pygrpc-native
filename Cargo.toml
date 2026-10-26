@@ -40,3 +40,9 @@ tonic = { version = "0.14", default-features = false, features = ["server", "gzi
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+# grpc-core sends a Unix socket path, percent-encoded, as :authority, which
+# http 1.5 rejects (hyperium/http#836). The copy allows valid escapes in the
+# host. Drop it once upstream does.
+[patch.crates-io]
+http = { path = "vendor/http" }

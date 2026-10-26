@@ -186,11 +186,10 @@ def test_unix_socket() -> None:
             _,
         ):
             assert front.bound_port == 1
-            # h2 rejects the default :authority grpcio sends over a Unix socket.
-            with grpc.insecure_channel(
-                f"unix:{path}", options=[("grpc.default_authority", "localhost")]
-            ) as channel:
-                assert channel.unary_unary("/t.S/Echo")(b"u", timeout=5) == b"u"
+            # grpcio sends the socket path, percent-encoded, as :authority.
+            for target in (f"unix:{path}", f"unix://{path}"):
+                with grpc.insecure_channel(target) as channel:
+                    assert channel.unary_unary("/t.S/Echo")(b"u", timeout=5) == b"u"
         assert not os.path.exists(path)
 
 
