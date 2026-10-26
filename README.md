@@ -128,8 +128,6 @@ this README. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
   send them there on their own.
 - No TLS yet, and grpcio interceptors don't run on the listed methods. Bearer
   tokens are the only authentication, and only on `NativeGrpcFront`.
-- Clients of a Unix socket server must set `grpc.default_authority`, since
-  the socket path grpc-core sends as `:authority` is not valid HTTP/2.
 - Like grpc-core, binding a Unix socket path replaces any socket file
   already there.
 - Per connection: at most 1024 concurrent streams and 16 KiB of request
