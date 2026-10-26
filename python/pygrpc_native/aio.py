@@ -92,6 +92,7 @@ class _Context(aio.ServicerContext):
         self._trailing_metadata: Sequence[tuple[str, str | bytes]] = ()
         # A write() found the stream gone or failed to encode the message.
         self._closed = False
+        self._aborted = False
 
     async def read(self) -> NoReturn:
         raise RuntimeError("read() is only for client-streaming methods")
@@ -129,6 +130,7 @@ class _Context(aio.ServicerContext):
         self._code, self._details = code, details
         if trailing_metadata:
             self._trailing_metadata = trailing_metadata
+        self._aborted = True
         raise aio.AbortError("Locally aborted.")
 
     async def abort_with_status(self, status: grpc.Status) -> NoReturn:
@@ -191,6 +193,74 @@ class _Context(aio.ServicerContext):
             callback(self)
         else:
             self._call.callbacks.append(callback)
+
+
+class _SyncContext:
+    """What a handler that isn't a coroutine gets instead of the context, with
+    the same methods as grpcio's: they run on the event loop from the handler's
+    thread."""
+
+    def __init__(self, context: _Context, loop: asyncio.AbstractEventLoop) -> None:
+        self._context = context
+        self._loop = loop
+        self._callbacks: list[Callable[[], None]] = []
+
+    def abort(
+        self,
+        code: grpc.StatusCode,
+        details: str = "",
+        trailing_metadata: Sequence[tuple[str, str | bytes]] = (),
+    ) -> None:
+        # As in grpcio, this doesn't raise: the call ends with the status
+        # once the handler returns.
+        asyncio.run_coroutine_threadsafe(
+            self._context.abort(code, details, trailing_metadata), self._loop
+        ).exception()
+
+    def send_initial_metadata(
+        self, metadata: Sequence[tuple[str, str | bytes]]
+    ) -> None:
+        asyncio.run_coroutine_threadsafe(
+            self._context.send_initial_metadata(metadata), self._loop
+        ).result()
+
+    def set_trailing_metadata(
+        self, metadata: Sequence[tuple[str, str | bytes]]
+    ) -> None:
+        self._context.set_trailing_metadata(metadata)
+
+    def invocation_metadata(self) -> tuple[_Metadatum, ...]:
+        return self._context.invocation_metadata()
+
+    def set_code(self, code: grpc.StatusCode) -> None:
+        self._context.set_code(code)
+
+    def set_details(self, details: str) -> None:
+        self._context.set_details(details)
+
+    def set_compression(self, compression: grpc.Compression) -> None:
+        self._context.set_compression(compression)
+
+    def disable_next_message_compression(self) -> None:
+        self._context.disable_next_message_compression()
+
+    def add_callback(self, callback: Callable[[], None]) -> None:
+        self._callbacks.append(callback)
+
+    def peer(self) -> str:
+        return self._context.peer()
+
+    def peer_identities(self) -> None:
+        return self._context.peer_identities()
+
+    def peer_identity_key(self) -> None:
+        return self._context.peer_identity_key()
+
+    def auth_context(self) -> dict[str, list[bytes]]:
+        return self._context.auth_context()
+
+    def time_remaining(self) -> float:
+        return self._context.time_remaining()
 
 
 class Server(_Codec, aio.Server):
@@ -460,9 +530,12 @@ class Server(_Codec, aio.Server):
                 response = await handler(request, context)
             else:
                 loop = asyncio.get_running_loop()
+                sync_context = _SyncContext(context, loop)
                 response = await loop.run_in_executor(
-                    self._executor, handler, request, context
+                    self._executor, handler, request, sync_context
                 )
+                for callback in sync_context._callbacks:
+                    callback()
         except Exception as exc:
             self._failed(call, context, exc)
             return False, None
@@ -526,7 +599,7 @@ class Server(_Codec, aio.Server):
     ) -> bool:
         loop = asyncio.get_running_loop()
         responses = await loop.run_in_executor(
-            self._executor, handler, request, context
+            self._executor, handler, request, _SyncContext(context, loop)
         )
         try:
             while (
@@ -534,6 +607,9 @@ class Server(_Codec, aio.Server):
                     self._executor, next, responses, _END
                 )
             ) is not _END:
+                # Nothing more goes out once the handler aborted.
+                if context._aborted:
+                    break
                 if not await self._send(call, context, response):
                     return False
         finally:
