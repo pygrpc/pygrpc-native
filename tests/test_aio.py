@@ -526,7 +526,7 @@ def test_uvloop(pb: tuple[Any, Any]) -> None:
 
 def test_unsupported_features_are_rejected() -> None:
     with pytest.raises(ValueError, match="unsupported server option"):
-        pygrpc_native.aio.server(options=[("grpc.keepalive_time_ms", 1000)])
+        pygrpc_native.aio.server(options=[("grpc.max_concurrent_streams", 10)])
     server = pygrpc_native.aio.server()
     with pytest.raises(NotImplementedError):
         server.add_secure_port("127.0.0.1:0", cast(Any, object()))
