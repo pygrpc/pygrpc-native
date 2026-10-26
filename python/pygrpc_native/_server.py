@@ -13,6 +13,7 @@ from typing import Any
 
 import grpc
 
+from pygrpc_native._grpc_args import GRPC_CORE_ARGS, UNREAD_GRPC_CORE_ARGS
 from pygrpc_native._native import EVENT_CALL, EVENT_CANCEL, NativeGrpcFront
 
 _LOGGER = logging.getLogger(__name__)
@@ -36,21 +37,17 @@ _AUTH_CONTEXT = {
 }
 
 # Options grpcio servers take that need no work here: the server never limits
-# client pings, and grpc-core doesn't read grpc.max_message_length at all.
-_IGNORED_OPTIONS = frozenset(
-    {
-        "grpc.http2.min_ping_interval_without_data_ms",
-        "grpc.http2.max_ping_strikes",
-        "grpc.http2.max_pings_without_data",
-        "grpc.max_message_length",
-    }
-)
-# grpc-core's server defaults.
-_KEEPALIVE_DEFAULTS = {
-    "keepalive_time_ms": 7_200_000,
-    "keepalive_timeout_ms": 20_000,
-    "keepalive_permit_without_calls": False,
+# client pings, and grpc-core's flow control picks the frame size itself, so
+# grpcio servers advertise the same one whatever grpc.http2.max_frame_size says.
+_IGNORED_OPTIONS = UNREAD_GRPC_CORE_ARGS | {
+    "grpc.http2.max_frame_size",
+    "grpc.http2.min_ping_interval_without_data_ms",
+    "grpc.http2.max_ping_strikes",
+    "grpc.http2.max_pings_without_data",
 }
+# NativeGrpcFront arguments that differ from its defaults for grpcio
+# compatibility: grpc-core servers only ping connections with calls.
+_FRONT_DEFAULTS = {"keepalive_permit_without_calls": False}
 
 
 def _code(code: grpc.StatusCode) -> int:
@@ -64,11 +61,11 @@ def _limit(value: int) -> int | None:
 def _parse_options(
     options: Iterable[tuple[str, Any]] | None,
 ) -> tuple[int | None, int | None, dict[str, Any]]:
-    """Returns the receive and send limits and the keepalive arguments of
+    """Returns the receive and send limits and the arguments for
     NativeGrpcFront."""
     receive: int | None = _DEFAULT_RECEIVE_LIMIT
     send: int | None = None
-    keepalive = dict(_KEEPALIVE_DEFAULTS)
+    front = dict(_FRONT_DEFAULTS)
     for key, value in options or ():
         # grpc-core ignores a value that isn't an integer where it reads one.
         integer = isinstance(value, int)
@@ -80,17 +77,23 @@ def _parse_options(
                 send = _limit(value)
         elif key in ("grpc.keepalive_time_ms", "grpc.keepalive_timeout_ms"):
             if integer:
-                keepalive[key[len("grpc.") :]] = max(1, value)
+                front[key[len("grpc.") :]] = max(1, value)
         elif key == "grpc.keepalive_permit_without_calls":
             if integer:
-                keepalive["keepalive_permit_without_calls"] = bool(value)
+                front["keepalive_permit_without_calls"] = bool(value)
+        elif key == "grpc.max_concurrent_streams":
+            if integer and value >= 0:
+                front["max_concurrent_streams"] = min(value, 2**32 - 1)
         elif key in _IGNORED_OPTIONS:
             pass
         elif key == "grpc.so_reuseport" and not (integer and value):
             pass
+        elif key not in GRPC_CORE_ARGS:
+            # grpc-core doesn't know it, so grpcio ignores it.
+            pass
         else:
             raise ValueError(f"unsupported server option {key!r}")
-    return receive, send, keepalive
+    return receive, send, front
 
 
 def _split_handlers(
@@ -369,7 +372,7 @@ class Server(_Codec, grpc.Server):
         if compression not in (None, grpc.Compression.NoCompression):
             raise NotImplementedError("response compression isn't supported")
         self._options = list(options or ())
-        self._receive_limit, self._send_limit, self._keepalive = _parse_options(
+        self._receive_limit, self._send_limit, self._front_args = _parse_options(
             self._options
         )
         self._executor = thread_pool
@@ -408,7 +411,7 @@ class Server(_Codec, grpc.Server):
                 io_threads=self._io_threads,
                 call_details=True,
                 delay_stream_headers=True,
-                **self._keepalive,
+                **self._front_args,
             )
         except OSError as exc:
             raise RuntimeError(f"Failed to bind to address {address}") from exc

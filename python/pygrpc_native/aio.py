@@ -227,7 +227,7 @@ class Server(_Codec, aio.Server):
         if compression not in (None, grpc.Compression.NoCompression):
             raise NotImplementedError("response compression isn't supported")
         self._options = list(options or ())
-        self._receive_limit, self._send_limit, self._keepalive = _parse_options(
+        self._receive_limit, self._send_limit, self._front_args = _parse_options(
             self._options
         )
         self._executor = migration_thread_pool
@@ -266,7 +266,7 @@ class Server(_Codec, aio.Server):
                 io_threads=self._io_threads,
                 call_details=True,
                 delay_stream_headers=True,
-                **self._keepalive,
+                **self._front_args,
             )
         except OSError as exc:
             raise RuntimeError(f"Failed to bind to address {address}") from exc
