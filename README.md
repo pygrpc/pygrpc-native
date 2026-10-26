@@ -188,10 +188,21 @@ front = NativeGrpcFront(
 `grpc.Server` on a Unix socket and its methods are proxied there, with its
 interceptors.
 
+## Compatibility
+
+pygrpc-native follows semantic versioning, and the low-level API stays
+compatible within 0.x as well. `tests/test_api.py` pins the 0.1 names,
+signatures and event tuples of `NativeGrpcFront`: they won't change or go
+away, and new parameters only come after the existing ones, with a default.
+`server()` and `aio.server()` follow grpcio's API, and any difference from
+grpcio's behavior is a bug unless it is listed in this README. Changes are
+listed in [CHANGELOG.md](CHANGELOG.md).
+
 ## Limitations
 
-- Unary and server-streaming methods only. Other kinds can go through the
-  fallback server.
+- `NativeGrpcFront` serves unary and server-streaming methods only; other
+  kinds can go through the fallback server. `server()` and `aio.server()`
+  send them there on their own.
 - No TLS yet, and grpcio interceptors don't run on the listed methods. Bearer
   tokens are the only authentication, and only on `NativeGrpcFront`.
 - Clients of a Unix socket server must set `grpc.default_authority`, since
@@ -204,9 +215,11 @@ interceptors.
 
 ## Benchmarks
 
-With an empty handler, pygrpc-native answers about 1.6x the calls per second
-of grpcio's servers from one client thread, and 4x to 12x from 16 or 32. See
-[benchmarks](benchmarks/README.md).
+With an empty handler on an Apple M4 Pro, `pygrpc_native.server()` answers
+about 1.5x the calls per second of `grpc.server()` from one client thread and
+about 5x from 32. On a 40-vCPU Linux container the low-level API answered
+about 12x at 32 threads. See [benchmarks](benchmarks/README.md) for the
+numbers and how they were measured.
 
 ## Tests
 
