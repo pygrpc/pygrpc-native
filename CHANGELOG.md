@@ -12,9 +12,13 @@ All notable changes are listed here. The project follows
 - `server()` and `aio.server()` take the `grpc.keepalive_time_ms`,
   `grpc.keepalive_timeout_ms` and `grpc.keepalive_permit_without_calls`
   options, and `NativeGrpcFront` the matching `keepalive_*` arguments.
-- `server()` and `aio.server()` accept options grpcio ignores:
-  `grpc.max_message_length`, which grpc-core doesn't read, and option values
-  that aren't integers, such as `("grpc.so_reuseport", "0")`.
+- `server()` and `aio.server()` take `grpc.max_concurrent_streams`, and
+  `NativeGrpcFront` a matching `max_concurrent_streams` argument.
+- `server()` and `aio.server()` accept options grpcio ignores: names
+  grpc-core doesn't know or no longer reads, such as
+  `grpc.max_message_length` and `grpc.http2.min_time_between_pings_ms`,
+  `grpc.http2.max_frame_size`, which grpc-core's flow control overrides, and
+  option values that aren't integers, such as `("grpc.so_reuseport", "0")`.
 - `metrics()` also reports each call's sent and received message bytes,
   like gRFC A66's `grpc.server.call.sent_total_compressed_message_size` and
   `rcvd_total_compressed_message_size`, under the new keys `size_bounds`,
@@ -27,6 +31,9 @@ All notable changes are listed here. The project follows
 
 ### Fixed
 
+- Handlers that aren't coroutines get grpcio's sync context on
+  `aio.server()`, so calling `abort()` from them ends the call with that
+  status instead of INTERNAL.
 - `server()` and `aio.server()` ignore a message size limit that isn't an
   integer, as grpcio does, instead of converting it.
 - grpcio clients can call a Unix socket server without setting
