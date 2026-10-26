@@ -60,7 +60,8 @@ reflection, or handlers added only with `add_generic_rpc_handlers`, go to a
 grpcio server on a Unix socket behind it. They work, but they aren't any
 faster, and `peer()` in them is the socket.
 
-Interceptors, `maximum_concurrent_rpcs`, TLS, response compression, and server
+Interceptors run as in grpcio, on the methods served here and on the fallback
+server. `maximum_concurrent_rpcs`, TLS, response compression, and server
 options other than the message size limits and client ping settings raise an
 error rather than being ignored. There's one known difference: if a unary
 handler calls `send_initial_metadata()` and then fails, the metadata goes out
@@ -126,8 +127,8 @@ this README. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 - `NativeGrpcFront` serves unary and server-streaming methods only; other
   kinds can go through the fallback server. `server()` and `aio.server()`
   send them there on their own.
-- No TLS yet, and grpcio interceptors don't run on the listed methods. Bearer
-  tokens are the only authentication, and only on `NativeGrpcFront`.
+- No TLS yet. `NativeGrpcFront` checks bearer tokens itself; `server()` and
+  `aio.server()` run grpcio interceptors instead.
 - Like grpc-core, binding a Unix socket path replaces any socket file
   already there.
 - Per connection: at most 1024 concurrent streams and 16 KiB of request
