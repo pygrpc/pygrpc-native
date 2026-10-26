@@ -262,6 +262,11 @@ class _SyncContext:
     def time_remaining(self) -> float:
         return self._context.time_remaining()
 
+    def __getattr__(self, name: str) -> Any:
+        # Methods grpcio's sync context lacks still reach the context, as
+        # they did before this class existed.
+        return getattr(self._context, name)
+
 
 class Server(_Codec, aio.Server):
     """A grpc.aio.Server whose HTTP/2 and gRPC work runs in Rust.
