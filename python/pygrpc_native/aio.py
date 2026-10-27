@@ -195,6 +195,20 @@ class _Context(aio.ServicerContext):
             self._call.callbacks.append(callback)
 
 
+def _to_bytes(serializer: Callable[[Any], bytes] | None, response: Any) -> bytes:
+    """Encodes a response as grpc.aio does: text as UTF-8 and None as an empty
+    message. Unlike the sync server, a failure here is an unexpected error of
+    the handler."""
+    if isinstance(response, str):
+        response = response.encode("utf-8")
+    data = serializer(response) if serializer else response
+    if data is None:
+        return b""
+    if not isinstance(data, bytes):
+        raise TypeError(f"Expected bytes, got {type(data).__name__}")
+    return data
+
+
 class _SyncContext:
     """What a handler that isn't a coroutine gets instead of the context, with
     the same methods as grpcio's: they run on the event loop from the handler's
@@ -553,7 +567,7 @@ class Server(_Codec, aio.Server):
         ok, response = await self._unary_response(call, context, request)
         if not ok:
             return
-        data = self._serialize(call, response)
+        data = self._encode(call, context, response)
         if data is not None:
             self._front.respond(  # type: ignore[union-attr]
                 call.call_id,
@@ -623,10 +637,18 @@ class Server(_Codec, aio.Server):
                 close()
         return True
 
+    def _encode(self, call: _Call, context: _Context, response: Any) -> bytes | None:
+        try:
+            data = _to_bytes(call.handler.response_serializer, response)
+        except Exception as exc:
+            self._failed(call, context, exc)
+            return None
+        return self._within_send_limit(call, data)
+
     async def _send(self, call: _Call, context: _Context, response: Any) -> bool:
         front = self._front
         assert front is not None
-        data = self._serialize(call, response)
+        data = self._encode(call, context, response)
         if data is None:
             return False
         context._initial_sent = True

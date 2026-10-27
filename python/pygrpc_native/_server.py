@@ -354,8 +354,11 @@ class _Codec:
                 "Failed to serialize response!",
             )
             return None
+        return self._within_send_limit(call, data)
+
+    def _within_send_limit(self, call: Any, data: bytes) -> bytes | None:
         if self._send_limit is not None and len(data) > self._send_limit:
-            front.fail(
+            self._front.fail(  # type: ignore[union-attr]
                 call.call_id,
                 _code(grpc.StatusCode.RESOURCE_EXHAUSTED),
                 f"SERVER: Sent message larger than max ({len(data)} vs. {self._send_limit})",
