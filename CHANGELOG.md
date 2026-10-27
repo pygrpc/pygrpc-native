@@ -4,48 +4,53 @@ All notable changes are listed here. The project follows
 [semantic versioning](https://semver.org); see
 [Compatibility](README.md#compatibility) for what that covers.
 
-## Unreleased
+## 0.4.0 (2026-10-27)
+
+`server()` and `aio.server()` now take the interceptors and options grpcio
+servers commonly pass. Code written for 0.3 keeps working; the changes in
+behavior below bring the servers closer to grpcio.
 
 ### Added
 
-- `server()` and `aio.server()` take grpcio server interceptors.
+- `server()` and `aio.server()` take grpcio server interceptors. (#39)
 - `server()` and `aio.server()` take the `grpc.keepalive_time_ms`,
   `grpc.keepalive_timeout_ms` and `grpc.keepalive_permit_without_calls`
-  options, and `NativeGrpcFront` the matching `keepalive_*` arguments.
+  options, and `NativeGrpcFront` the matching `keepalive_*` arguments. (#47)
 - `server()` and `aio.server()` take `grpc.max_concurrent_streams`, and
-  `NativeGrpcFront` a matching `max_concurrent_streams` argument.
+  `NativeGrpcFront` a matching `max_concurrent_streams` argument. (#51)
 - `server()` and `aio.server()` take `grpc.max_metadata_size` and
   `grpc.absolute_max_metadata_size`, and `NativeGrpcFront` a matching
-  `max_metadata_size` argument.
+  `max_metadata_size` argument. (#51)
 - `server()` and `aio.server()` ignore options they don't take, as grpcio
   does, such as options only clients read, `grpc.max_message_length` and
   `grpc.http2.max_frame_size`, and values that aren't integers. Only options
   asking for something the server can't do, such as closing connections by
-  age or compressing responses, still raise an error.
+  age or compressing responses, still raise an error. (#47, #51)
 - `metrics()` also reports each call's sent and received message bytes,
   like gRFC A66's `grpc.server.call.sent_total_compressed_message_size` and
   `rcvd_total_compressed_message_size`, under the new keys `size_bounds`,
-  `sent` and `rcvd`.
+  `sent` and `rcvd`. (#37)
 
 ### Changed
 
 - Like grpc-core, the keepalive ping now waits until a connection has
-  received nothing for the keepalive time, so busy connections aren't pinged.
+  received nothing for the keepalive time, so busy connections aren't
+  pinged. (#47)
 
 ### Fixed
 
 - Handlers that aren't coroutines get grpcio's sync context on
   `aio.server()`, so calling `abort()` from them ends the call with that
-  status instead of INTERNAL.
+  status instead of INTERNAL. (#51)
 - `aio.server()` encodes responses as grpc.aio does: a handler's `None` goes
   out as an empty message when there's no serializer, and a response that
   fails to serialize ends the call with UNKNOWN, like any other error in the
-  handler, instead of INTERNAL.
+  handler, instead of INTERNAL. (#51)
 - `server()` and `aio.server()` ignore a message size limit that isn't an
-  integer, as grpcio does, instead of converting it.
+  integer, as grpcio does, instead of converting it. (#47)
 - grpcio clients can call a Unix socket server without setting
   `grpc.default_authority`. This uses a patched copy of the `http` crate
-  until hyperium/http#836 is fixed upstream.
+  until hyperium/http#836 is fixed upstream. (#35)
 
 ## 0.3.0 (2026-10-26)
 
