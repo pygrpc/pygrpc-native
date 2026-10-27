@@ -409,6 +409,7 @@ dependencies = [
  "pyo3",
  "pyo3-log",
  "sha2",
+ "socket2",
  "subtle",
  "tokio",
  "tonic",

@@ -89,6 +89,9 @@ struct Running {
 ///     max_metadata_size: The most request metadata, in bytes, a call may
 ///         carry; a call with more is refused. Counted as HTTP/2 counts a
 ///         header list, as grpc-core does.
+///     reuse_port: Set SO_REUSEPORT on TCP listeners, so several processes
+///         can serve one port. On Linux the kernel spreads connections
+///         across them. Ignored for Unix sockets.
 ///
 /// Raises:
 ///     OSError: If the address cannot be bound.
@@ -122,6 +125,7 @@ impl NativeGrpcFront {
         keepalive_permit_without_calls=true,
         max_concurrent_streams=1024,
         max_metadata_size=16384,
+        reuse_port=false,
     ))]
     // Python keyword arguments.
     #[allow(clippy::too_many_arguments)]
@@ -140,6 +144,7 @@ impl NativeGrpcFront {
         keepalive_permit_without_calls: bool,
         max_concurrent_streams: u32,
         max_metadata_size: u32,
+        reuse_port: bool,
     ) -> PyResult<Self> {
         if io_threads == 0 {
             return Err(PyValueError::new_err("io_threads must be greater than 0"));
@@ -187,7 +192,7 @@ impl NativeGrpcFront {
             PyOSError::new_err((err.raw_os_error().unwrap_or(0), format!("{target}: {err}")))
         };
         // Bind before starting any thread, so a failed bind leaves none behind.
-        let bound = bind(target).map_err(os_error)?;
+        let bound = bind(target, reuse_port).map_err(os_error)?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(io_threads)
             .thread_name("grpc-native-io")
@@ -712,7 +717,7 @@ struct BoundSockets {
     socket_path: Option<PathBuf>,
 }
 
-fn bind(target: &str) -> std::io::Result<BoundSockets> {
+fn bind(target: &str, reuse_port: bool) -> std::io::Result<BoundSockets> {
     let unix_path = target
         .strip_prefix("unix://")
         .or_else(|| target.strip_prefix("unix:"));
@@ -732,8 +737,8 @@ fn bind(target: &str) -> std::io::Result<BoundSockets> {
         });
     }
     // Like grpc-core, bind every address the host resolves to (localhost is
-    // both 127.0.0.1 and ::1), all on the port the first one got. std's bind
-    // never sets SO_REUSEPORT, so a port already in use fails.
+    // both 127.0.0.1 and ::1), all on the port the first one got. Without
+    // reuse_port, a port already in use fails.
     let mut addrs: Vec<std::net::SocketAddr> = Vec::new();
     for addr in target.to_socket_addrs()? {
         if !addrs.contains(&addr) {
@@ -747,7 +752,7 @@ fn bind(target: &str) -> std::io::Result<BoundSockets> {
         if port != 0 {
             addr.set_port(port);
         }
-        match std::net::TcpListener::bind(addr) {
+        match bind_tcp(addr, reuse_port) {
             Ok(listener) => {
                 listener.set_nonblocking(true)?;
                 port = listener.local_addr()?.port();
@@ -769,6 +774,29 @@ fn bind(target: &str) -> std::io::Result<BoundSockets> {
         port,
         socket_path: None,
     })
+}
+
+// std's backlog.
+const LISTEN_BACKLOG: i32 = 128;
+
+fn bind_tcp(
+    addr: std::net::SocketAddr,
+    reuse_port: bool,
+) -> std::io::Result<std::net::TcpListener> {
+    if !reuse_port {
+        return std::net::TcpListener::bind(addr);
+    }
+    // SO_REUSEPORT has to be set before bind, which std doesn't allow.
+    let socket = socket2::Socket::new(
+        socket2::Domain::for_address(addr),
+        socket2::Type::STREAM,
+        Some(socket2::Protocol::TCP),
+    )?;
+    socket.set_reuse_address(true)?;
+    socket.set_reuse_port(true)?;
+    socket.bind(&addr.into())?;
+    socket.listen(LISTEN_BACKLOG)?;
+    Ok(socket.into())
 }
 
 #[pymodule]
