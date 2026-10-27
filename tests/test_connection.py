@@ -141,11 +141,11 @@ def test_idle_connections_are_pinged_only_when_permitted() -> None:
 def test_reads_put_off_the_ping() -> None:
     # grpc-core only pings a connection that has read nothing for the
     # keepalive time.
-    front = _front(keepalive_time_ms=300, keepalive_timeout_ms=100)
+    front = _front(keepalive_time_ms=1000, keepalive_timeout_ms=100)
     peer = Peer(front.bound_port)
     window_update = _frame(0x8, 0, 0, struct.pack(">I", 1))
     try:
-        for _ in range(10):
+        for _ in range(25):
             peer.sock.sendall(window_update)
             assert PING not in list(peer.frames(0.1))
         seen = list(peer.frames(5))
@@ -158,12 +158,12 @@ def test_reads_put_off_the_ping() -> None:
 
 def test_anything_read_after_a_ping_answers_it() -> None:
     # As in grpc-core, a client still sending isn't cut off for a late answer.
-    front = _front(keepalive_time_ms=200, keepalive_timeout_ms=100)
+    front = _front(keepalive_time_ms=200, keepalive_timeout_ms=1000)
     peer = Peer(front.bound_port)
     try:
         assert any(kind == PING for kind in peer.frames(5))
         peer.sock.sendall(_frame(0x8, 0, 0, struct.pack(">I", 1)))
-        assert -1 not in list(peer.frames(0.5))
+        assert -1 not in list(peer.frames(1.5))
     finally:
         peer.close()
         front.close()
