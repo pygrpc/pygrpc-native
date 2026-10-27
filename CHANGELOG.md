@@ -4,6 +4,13 @@ All notable changes are listed here. The project follows
 [semantic versioning](https://semver.org); see
 [Compatibility](README.md#compatibility) for what that covers.
 
+## Unreleased
+
+### Fixed
+
+- `from pygrpc_native import aio`, and `pygrpc_native.aio` after a plain
+  `import pygrpc_native`, no longer fail with `RecursionError`.
+
 ## 0.5.0 (2026-10-27)
 
 Everything here is an addition, so code written for 0.4 keeps working.

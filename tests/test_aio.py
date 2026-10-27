@@ -2,6 +2,7 @@
 
 import asyncio
 import importlib
+import subprocess
 import sys
 from collections.abc import AsyncIterator, Callable, Iterator
 from concurrent import futures
@@ -552,6 +553,15 @@ def test_unsupported_features_are_rejected() -> None:
 def test_module_attribute() -> None:
     assert pygrpc_native.aio.Server.__module__ == "pygrpc_native.aio"
     assert isinstance(pygrpc_native.aio.server(), aio.Server)
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["from pygrpc_native import aio", "import pygrpc_native; pygrpc_native.aio"],
+)
+def test_aio_reached_from_the_package(code: str) -> None:
+    # A fresh interpreter: this one has imported pygrpc_native.aio already.
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=60)
 
 
 def test_slow_reader_gets_every_message(pb: tuple[Any, Any]) -> None:

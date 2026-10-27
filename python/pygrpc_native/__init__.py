@@ -1,3 +1,4 @@
+import importlib
 from typing import TYPE_CHECKING
 
 from pygrpc_native._native import (
@@ -30,12 +31,10 @@ __all__ = [
 
 def __getattr__(name: str):
     # The grpcio-compatible servers need grpcio; the low-level API doesn't.
+    # import_module, not "from pygrpc_native import ...": that looks the name
+    # up on this module first and lands back here.
     if name in ("Server", "server"):
-        from pygrpc_native import _server
-
-        return getattr(_server, name)
+        return getattr(importlib.import_module("pygrpc_native._server"), name)
     if name == "aio":
-        from pygrpc_native import aio
-
-        return aio
+        return importlib.import_module("pygrpc_native.aio")
     raise AttributeError(f"module 'pygrpc_native' has no attribute {name!r}")
