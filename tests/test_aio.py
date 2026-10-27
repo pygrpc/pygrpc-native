@@ -197,6 +197,10 @@ async def _echo(request: Any, context: aio.ServicerContext) -> Any:
     return request
 
 
+async def _none(request: Any, context: aio.ServicerContext) -> Any:
+    return None
+
+
 UNARY_CASES: dict[str, Behavior] = {
     "echo": _echo,
     "metadata": _metadata,
@@ -207,6 +211,7 @@ UNARY_CASES: dict[str, Behavior] = {
     "catch_abort": _catch_abort,
     "set_code": _set_code,
     "set_code_then_raise": _set_code_then_raise,
+    "none": _none,
 }
 
 
@@ -256,6 +261,13 @@ async def _stream_metadata(
     yield request
 
 
+async def _stream_none(
+    request: Any, context: aio.ServicerContext
+) -> AsyncIterator[Any]:
+    yield request
+    yield None
+
+
 async def _headers_only(
     request: Any, context: aio.ServicerContext
 ) -> AsyncIterator[Any]:
@@ -272,6 +284,7 @@ STREAM_CASES: dict[str, Behavior] = {
     "abort_first": _stream_abort_first,
     "metadata": _stream_metadata,
     "headers_first": _headers_only,
+    "none": _stream_none,
 }
 
 
@@ -526,7 +539,7 @@ def test_uvloop(pb: tuple[Any, Any]) -> None:
 
 def test_unsupported_features_are_rejected() -> None:
     with pytest.raises(ValueError, match="unsupported server option"):
-        pygrpc_native.aio.server(options=[("grpc.max_concurrent_streams", 10)])
+        pygrpc_native.aio.server(options=[("grpc.max_connection_idle_ms", 1000)])
     server = pygrpc_native.aio.server()
     with pytest.raises(NotImplementedError):
         server.add_secure_port("127.0.0.1:0", cast(Any, object()))
@@ -563,3 +576,92 @@ def test_slow_reader_gets_every_message(pb: tuple[Any, Any]) -> None:
             await server.stop(None)
 
     assert asyncio.run(run()) == [str(i) for i in range(16)]
+
+
+def test_sync_handlers_get_grpcio_sync_context() -> None:
+    """Handlers that aren't coroutines get grpcio's sync context: abort()
+    returns, and the call ends with its status once the handler does."""
+    called: list[str] = []
+
+    def abort(request: bytes, context: Any) -> bytes:
+        context.abort(grpc.StatusCode.PERMISSION_DENIED, "denied")
+        return b"ignored"
+
+    def status(request: bytes, context: Any) -> bytes:
+        context.set_code(grpc.StatusCode.NOT_FOUND)
+        context.set_details("missing")
+        return b""
+
+    def metadata(request: bytes, context: Any) -> bytes:
+        context.send_initial_metadata([("x-a", "1")])
+        context.set_trailing_metadata([("x-b", "2")])
+        context.add_callback(lambda: called.append("done"))
+        return request
+
+    def extra(request: bytes, context: Any) -> bytes:
+        # Not on grpcio's sync context, but it worked here before.
+        return str(context.cancelled()).encode()
+
+    def stream_abort(request: bytes, context: Any) -> Iterator[bytes]:
+        yield b"1"
+        context.abort(grpc.StatusCode.ABORTED, "stop")
+        yield b"2"
+        yield b"3"
+
+    handlers = {
+        "Abort": grpc.unary_unary_rpc_method_handler(abort),
+        "Status": grpc.unary_unary_rpc_method_handler(status),
+        "Metadata": grpc.unary_unary_rpc_method_handler(metadata),
+        "StreamAbort": grpc.unary_stream_rpc_method_handler(stream_abort),
+        "Extra": grpc.unary_unary_rpc_method_handler(extra),
+    }
+
+    def calls(port: int, stream_abort: bool) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            for name in ("Abort", "Status"):
+                try:
+                    out[name] = channel.unary_unary(f"/s.S/{name}")(b"x", timeout=5)
+                except grpc.RpcError as error:
+                    out[name] = (error.code(), error.details())
+            response, call = channel.unary_unary("/s.S/Metadata").with_call(
+                b"x", timeout=5
+            )
+            out["Metadata"] = (
+                response,
+                [m for m in call.initial_metadata() if m[0].startswith("x-")],
+                [m for m in call.trailing_metadata() if m[0].startswith("x-")],
+            )
+            if stream_abort:
+                out["Extra"] = channel.unary_unary("/s.S/Extra")(b"x", timeout=5)
+                received: list[bytes] = []
+                try:
+                    for message in channel.unary_stream("/s.S/StreamAbort")(
+                        b"x", timeout=5
+                    ):
+                        received.append(message)
+                except grpc.RpcError as error:
+                    out["StreamAbort"] = (received, error.code(), error.details())
+        return out
+
+    async def run(factory: Any, stream_abort: bool) -> dict[str, Any]:
+        server = factory(futures.ThreadPoolExecutor(2))
+        server.add_registered_method_handlers("s.S", handlers)
+        port = server.add_insecure_port("127.0.0.1:0")
+        await server.start()
+        try:
+            return await asyncio.get_running_loop().run_in_executor(
+                None, calls, port, stream_abort
+            )
+        finally:
+            await server.stop(None)
+
+    native = asyncio.run(run(pygrpc_native.aio.server, stream_abort=True))
+    native_called, called[:] = list(called), []
+    # grpcio 1.84 never ends a sync stream that aborts: its client waits for
+    # the deadline and the handler's thread can hang, so only check it here.
+    assert native.pop("StreamAbort") == ([b"1"], grpc.StatusCode.ABORTED, "stop")
+    assert native.pop("Extra") == b"False"
+    assert native == asyncio.run(run(aio.server, stream_abort=False))
+    assert native_called == called == ["done"]
+    assert native["Abort"] == (grpc.StatusCode.PERMISSION_DENIED, "denied")

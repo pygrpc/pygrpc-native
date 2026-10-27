@@ -32,8 +32,8 @@ use tonic::metadata::{
 use tonic::{Code, Status};
 
 use server::{
-    accept_loop, AddMethodsError, Answer, BearerAuth, CallDetails, ClientKey, Event, Keepalive,
-    Listener, MetadataValue, Shared, CONNECTION_DRAIN_TIMEOUT,
+    accept_loop, AddMethodsError, Answer, BearerAuth, CallDetails, ClientKey, ConnectionSettings,
+    Event, Keepalive, Listener, MetadataValue, Shared, CONNECTION_DRAIN_TIMEOUT,
 };
 
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -82,6 +82,13 @@ struct Running {
 ///         closing the connection.
 ///     keepalive_permit_without_calls: Also ping connections with no calls
 ///         in flight. grpc-core servers don't.
+///     max_concurrent_streams: How many calls a client may have open on one
+///         connection; it waits for one to finish before starting more.
+///         hyper's server default is 200, but an engine keeps lookups and
+///         transfers in flight on one connection.
+///     max_metadata_size: The most request metadata, in bytes, a call may
+///         carry; a call with more is refused. Counted as HTTP/2 counts a
+///         header list, as grpc-core does.
 ///
 /// Raises:
 ///     OSError: If the address cannot be bound.
@@ -113,6 +120,8 @@ impl NativeGrpcFront {
         keepalive_time_ms=7_200_000,
         keepalive_timeout_ms=20_000,
         keepalive_permit_without_calls=true,
+        max_concurrent_streams=1024,
+        max_metadata_size=16384,
     ))]
     // Python keyword arguments.
     #[allow(clippy::too_many_arguments)]
@@ -129,6 +138,8 @@ impl NativeGrpcFront {
         keepalive_time_ms: u64,
         keepalive_timeout_ms: u64,
         keepalive_permit_without_calls: bool,
+        max_concurrent_streams: u32,
+        max_metadata_size: u32,
     ) -> PyResult<Self> {
         if io_threads == 0 {
             return Err(PyValueError::new_err("io_threads must be greater than 0"));
@@ -202,7 +213,11 @@ impl NativeGrpcFront {
                 call_details,
                 delay_stream_headers,
                 bearer_auth,
-                keepalive,
+                ConnectionSettings {
+                    keepalive,
+                    max_concurrent_streams,
+                    max_metadata_size,
+                },
                 metrics.then_some(io_threads),
             )),
             events,

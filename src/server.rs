@@ -41,17 +41,22 @@ pub const CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
 // reaches by growing its window.
 const STREAM_WINDOW: u32 = 4 << 20;
 const CONNECTION_WINDOW: u32 = (1 << 31) - 1;
-// Bounds what one client can make the server hold; a client opening more
-// streams waits for one to finish. hyper's server default is 200, but an
-// engine keeps lookups and transfers in flight on one connection.
-const MAX_CONCURRENT_STREAMS: u32 = 1024;
-// grpc-core's limit on request metadata.
-const MAX_HEADER_LIST_SIZE: u32 = 16 << 10;
 // grpc-core's default; a connection that never finishes the preface is dropped.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
 // grpc-core's default ping timeout: the longest a keepalive ping goes
 // unanswered, even while the client keeps sending.
 const PING_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Per-connection HTTP/2 settings.
+#[derive(Clone, Copy, Debug)]
+pub struct ConnectionSettings {
+    pub keepalive: Keepalive,
+    /// How many streams a client may open at once; it waits for one to
+    /// finish before opening more.
+    pub max_concurrent_streams: u32,
+    /// The largest header list a request may have.
+    pub max_metadata_size: u32,
+}
 
 /// When the server pings a connection to check that the client is still
 /// there, like grpc-core's keepalive arguments.
@@ -199,7 +204,7 @@ pub struct Shared {
     call_details: bool,
     delay_stream_headers: bool,
     bearer_auth: Option<BearerAuth>,
-    keepalive: Keepalive,
+    connection: ConnectionSettings,
     // Shard count when metrics are on; the metrics are built at start().
     metrics_shards: Option<usize>,
     metrics: OnceLock<Metrics>,
@@ -215,7 +220,7 @@ impl Shared {
         call_details: bool,
         delay_stream_headers: bool,
         bearer_auth: Option<BearerAuth>,
-        keepalive: Keepalive,
+        connection: ConnectionSettings,
         metrics_shards: Option<usize>,
     ) -> Self {
         Shared {
@@ -233,7 +238,7 @@ impl Shared {
             call_details,
             delay_stream_headers,
             bearer_auth,
-            keepalive,
+            connection,
             metrics_shards,
             metrics: OnceLock::new(),
             metrics_since: metrics::unix_nanos(),
@@ -913,8 +918,8 @@ pub(crate) async fn serve_connection<IO>(
     let handshake = h2::server::Builder::new()
         .initial_window_size(STREAM_WINDOW)
         .initial_connection_window_size(CONNECTION_WINDOW)
-        .max_concurrent_streams(MAX_CONCURRENT_STREAMS)
-        .max_header_list_size(MAX_HEADER_LIST_SIZE)
+        .max_concurrent_streams(shared.connection.max_concurrent_streams)
+        .max_header_list_size(shared.connection.max_metadata_size)
         .handshake::<_, Bytes>(io);
     let mut connection = tokio::select! {
         result = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake) => match result {
@@ -933,7 +938,7 @@ pub(crate) async fn serve_connection<IO>(
     let fallback = Arc::new(Fallback::default());
     let active = Arc::new(AtomicUsize::new(0));
     let keepalive = keepalive(
-        shared.keepalive,
+        shared.connection.keepalive,
         connection.ping_pong(),
         active.clone(),
         reads,

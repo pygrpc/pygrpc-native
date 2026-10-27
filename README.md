@@ -62,13 +62,19 @@ socket behind it. They work, but they aren't any faster, and `peer()` in
 them is the socket.
 
 Interceptors run as in grpcio, on the methods served here and on the fallback
-server. Of the server options, the message size limits and the keepalive
+server. Of the server options, the message size limits, the keepalive
 settings (`grpc.keepalive_time_ms`, `grpc.keepalive_timeout_ms` and
-`grpc.keepalive_permit_without_calls`) work as in grpcio, the limits on client
-pings are accepted but not enforced, and what grpc-core ignores, such as
-`grpc.max_message_length` or a value that isn't an integer, is ignored here
-too. `maximum_concurrent_rpcs`, TLS, response compression and other options
-raise an error rather than being ignored.
+`grpc.keepalive_permit_without_calls`), `grpc.max_concurrent_streams` and the
+metadata size limits (`grpc.max_metadata_size` and
+`grpc.absolute_max_metadata_size`) work as in grpcio. Options that ask for
+something this server can't do raise an error: closing connections by age or
+idleness (`grpc.max_connection_age_ms`, `grpc.max_connection_age_grace_ms`,
+`grpc.max_connection_idle_ms`), `grpc.max_allowed_incoming_connections`,
+response compression and `grpc.so_reuseport`, as do `maximum_concurrent_rpcs`
+and TLS. Any other option is ignored, as grpcio ignores the many that only
+clients read. That covers the limits on client pings, which are accepted but
+not enforced, and `grpc.http2.max_frame_size`, which grpc-core's flow control
+overrides anyway. Values that aren't integers are ignored too, as in grpcio.
 
 There are two known differences. If a unary handler calls
 `send_initial_metadata()` and then fails, the metadata goes out with the
@@ -93,7 +99,8 @@ Handlers run on the event loop that called `start()`, uvloop included.
 `abort()` raises `grpc.aio.AbortError`, and a handler whose client cancels or
 whose deadline passes gets `asyncio.CancelledError`, as in grpc.aio. Streams
 can yield from an async generator or call `context.write()`, and handlers
-that aren't coroutines run in `migration_thread_pool`. The fallback,
+that aren't coroutines run in `migration_thread_pool` with grpcio's sync
+context, where `abort()` returns instead of raising. The fallback,
 the unsupported options and the known differences are the same as
 for the sync server.
 
@@ -144,9 +151,12 @@ this README. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 - The server never sets `SO_REUSEPORT`, so binding a port another server is
   using fails, where grpcio's default lets both bind it. `grpc.so_reuseport`
   set to 0 is accepted; other integers raise an error.
-- Per connection: at most 1024 concurrent streams and 16 KiB of request
-  metadata. A connection that hasn't finished the HTTP/2 preface after 120 s
-  is dropped.
+- Per connection: at most 1024 concurrent streams unless
+  `grpc.max_concurrent_streams` says otherwise. A connection that hasn't
+  finished the HTTP/2 preface after 120 s is dropped.
+- A call with more request metadata than the limit (16 KiB unless set) is
+  refused. grpcio also refuses some calls at random between
+  `grpc.max_metadata_size` and that limit; this server doesn't.
 
 ## Benchmarks
 

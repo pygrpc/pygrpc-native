@@ -1,4 +1,5 @@
-"""Server keepalive pings and the server options grpcio takes for them."""
+"""HTTP/2 connection settings: keepalive pings, stream and frame limits, and
+the server options grpcio takes for them."""
 
 import socket
 import struct
@@ -81,6 +82,25 @@ class Peer:
                 yield -1  # closed
                 return
             self.buffer += data
+
+    def settings(self) -> dict[int, int]:
+        """The server's first SETTINGS frame, as {identifier: value}."""
+        while True:
+            while len(self.buffer) < 9 or len(self.buffer) < 9 + int.from_bytes(
+                self.buffer[:3], "big"
+            ):
+                self.buffer += self.sock.recv(65536)
+            length = int.from_bytes(self.buffer[:3], "big")
+            kind, flags = self.buffer[3], self.buffer[4]
+            payload = self.buffer[9 : 9 + length]
+            self.buffer = self.buffer[9 + length :]
+            if kind == SETTINGS and not flags & 0x1:
+                return {
+                    int.from_bytes(payload[i : i + 2], "big"): int.from_bytes(
+                        payload[i + 2 : i + 6], "big"
+                    )
+                    for i in range(0, length, 6)
+                }
 
     def close(self) -> None:
         self.sock.close()
@@ -276,3 +296,86 @@ def test_grpcio_ignores_max_message_length() -> None:
             assert channel.unary_unary("/t.S/U")(b"x" * 100, timeout=5) == b"x" * 100
     finally:
         server.stop(None)
+
+
+MAX_CONCURRENT_STREAMS, MAX_FRAME_SIZE, MAX_HEADER_LIST_SIZE = 0x3, 0x5, 0x6
+
+
+def _settings(port: int) -> dict[int, int]:
+    peer = Peer(port)
+    try:
+        return peer.settings()
+    finally:
+        peer.close()
+
+
+def test_stream_limit() -> None:
+    front = _front()
+    try:
+        defaults = _settings(front.bound_port)
+    finally:
+        front.close()
+    assert defaults[MAX_CONCURRENT_STREAMS] == 1024
+    assert defaults.get(MAX_FRAME_SIZE, 16384) == 16384
+    # grpcio advertises the same frame size whatever this option says.
+    server, port = _echo_server(
+        [("grpc.max_concurrent_streams", 7), ("grpc.http2.max_frame_size", 8192)]
+    )
+    try:
+        settings = _settings(port)
+    finally:
+        server.stop(None)
+    assert settings[MAX_CONCURRENT_STREAMS] == 7
+    assert settings.get(MAX_FRAME_SIZE, 16384) == 16384
+
+
+def test_options_the_server_cant_honor_are_the_only_ones_rejected() -> None:
+    # grpcio servers take all of these: a misspelling some servers carry, one
+    # grpc-core no longer reads, options only clients read (code often passes
+    # the same list to both), and HTTP/2 tuning.
+    ignored = [
+        ("grpc.http2.min_recv_ping_interval_without_data_ms", 10000),
+        ("grpc.http2.min_time_between_pings_ms", 10000),
+        ("grpc.enable_retries", 1),
+        ("grpc.service_config", '{"methodConfig": []}'),
+        ("grpc.enable_http_proxy", 0),
+        ("grpc.http2.bdp_probe", 0),
+        ("my.own.option", 1),
+    ]
+    server, port = _echo_server(ignored)
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            assert channel.unary_unary("/t.S/U")(b"x", timeout=5) == b"x"
+    finally:
+        server.stop(None)
+    for option in [
+        ("grpc.max_connection_idle_ms", 1000),
+        ("grpc.default_compression_algorithm", 2),
+    ]:
+        with pytest.raises(ValueError, match="unsupported server option"):
+            pygrpc_native.server(futures.ThreadPoolExecutor(1), options=[option])
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        [],
+        [("grpc.max_metadata_size", 32768)],
+        [("grpc.max_metadata_size", 4096)],
+        [("grpc.absolute_max_metadata_size", 8192)],
+    ],
+)
+def test_metadata_limit_matches_grpcio(options: list[tuple[str, Any]]) -> None:
+    server, port = _echo_server(options)
+    try:
+        native = _settings(port)
+    finally:
+        server.stop(None)
+    grpcio = grpc.server(futures.ThreadPoolExecutor(1), options=options)
+    port = grpcio.add_insecure_port("127.0.0.1:0")
+    grpcio.start()
+    try:
+        expected = _settings(port)
+    finally:
+        grpcio.stop(None)
+    assert native[MAX_HEADER_LIST_SIZE] == expected[MAX_HEADER_LIST_SIZE]
