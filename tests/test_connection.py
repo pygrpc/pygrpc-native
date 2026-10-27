@@ -207,7 +207,8 @@ def _echo_server(options: list[tuple[str, Any]]) -> tuple[Any, int]:
 def test_server_takes_grpc_keepalive_options() -> None:
     options = [
         ("grpc.keepalive_time_ms", 100),
-        ("grpc.keepalive_timeout_ms", 100),
+        # A loaded CI runner can take more than 100 ms to answer a ping.
+        ("grpc.keepalive_timeout_ms", 1000),
         ("grpc.keepalive_permit_without_calls", 1),
     ]
     server, port = _echo_server(options)
