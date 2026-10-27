@@ -64,14 +64,17 @@ them is the socket.
 Interceptors run as in grpcio, on the methods served here and on the fallback
 server. Of the server options, the message size limits, the keepalive
 settings (`grpc.keepalive_time_ms`, `grpc.keepalive_timeout_ms` and
-`grpc.keepalive_permit_without_calls`) and `grpc.max_concurrent_streams` work
-as in grpcio, and the limits on client pings are accepted but not enforced.
-What grpcio ignores is ignored here too: options grpc-core doesn't know or no
-longer reads, such as `grpc.max_message_length` and
-`grpc.http2.min_time_between_pings_ms`; `grpc.http2.max_frame_size`, which
-grpc-core's flow control overrides; and values that aren't integers.
-`maximum_concurrent_rpcs`, TLS, response compression and other options
-grpc-core knows raise an error rather than being ignored.
+`grpc.keepalive_permit_without_calls`), `grpc.max_concurrent_streams` and the
+metadata size limits (`grpc.max_metadata_size` and
+`grpc.absolute_max_metadata_size`) work as in grpcio. Options that ask for
+something this server can't do raise an error: closing connections by age or
+idleness (`grpc.max_connection_age_ms`, `grpc.max_connection_age_grace_ms`,
+`grpc.max_connection_idle_ms`), `grpc.max_allowed_incoming_connections`,
+response compression and `grpc.so_reuseport`, as do `maximum_concurrent_rpcs`
+and TLS. Any other option is ignored, as grpcio ignores the many that only
+clients read. That covers the limits on client pings, which are accepted but
+not enforced, and `grpc.http2.max_frame_size`, which grpc-core's flow control
+overrides anyway. Values that aren't integers are ignored too, as in grpcio.
 
 There are two known differences. If a unary handler calls
 `send_initial_metadata()` and then fails, the metadata goes out with the
@@ -149,9 +152,11 @@ this README. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
   using fails, where grpcio's default lets both bind it. `grpc.so_reuseport`
   set to 0 is accepted; other integers raise an error.
 - Per connection: at most 1024 concurrent streams unless
-  `grpc.max_concurrent_streams` says otherwise, and 16 KiB of request
-  metadata. A connection that hasn't finished the HTTP/2 preface after 120 s
-  is dropped.
+  `grpc.max_concurrent_streams` says otherwise. A connection that hasn't
+  finished the HTTP/2 preface after 120 s is dropped.
+- A call with more request metadata than the limit (16 KiB unless set) is
+  refused. grpcio also refuses some calls at random between
+  `grpc.max_metadata_size` and that limit; this server doesn't.
 
 ## Benchmarks
 
