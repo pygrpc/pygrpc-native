@@ -26,3 +26,5 @@ python-source = "python"
 module-name = "pygrpc_native._native"
 # The patched http crate (see Cargo.toml) has to ship in the sdist.
 include = [{ path = "vendor/**/*", format = "sdist" }]
+# The README's images are served from GitHub.
+exclude = [{ path = "assets/**/*", format = "sdist" }]
