@@ -4,6 +4,14 @@ All notable changes are listed here. The project follows
 [semantic versioning](https://semver.org); see
 [Compatibility](README.md#compatibility) for what that covers.
 
+## Unreleased
+
+### Added
+
+- `server()` and `aio.server()` take `grpc.so_reuseport` set to 1, so several
+  processes can serve one port, and `NativeGrpcFront` a matching `reuse_port`
+  argument. It stays off unless asked for.
+
 ## 0.4.0 (2026-10-27)
 
 `server()` and `aio.server()` now take the interceptors and options grpcio
