@@ -47,7 +47,6 @@ _UNSUPPORTED_OPTIONS = frozenset(
         "grpc.max_connection_age_grace_ms",
         "grpc.max_connection_age_ms",
         "grpc.max_connection_idle_ms",
-        "grpc.so_reuseport",
     }
 )
 # grpc-core's limit on request metadata when no option sets it.
@@ -98,6 +97,9 @@ def _parse_options(
         elif key == "grpc.absolute_max_metadata_size":
             if integer:
                 hard_metadata = value
+        elif key == "grpc.so_reuseport":
+            if integer:
+                front["reuse_port"] = bool(value)
         elif key in _UNSUPPORTED_OPTIONS and integer and value:
             raise ValueError(f"unsupported server option {key!r}")
     if hard_metadata >= 0 or soft_metadata >= 0:

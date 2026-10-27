@@ -274,12 +274,11 @@ def test_options_grpc_core_ignores_are_accepted() -> None:
             peer.close()
     finally:
         server.stop(None)
+    # Unlike grpcio, the server only sets SO_REUSEPORT when asked to.
+    assert not _bind_twice([])
     assert not _bind_twice([("grpc.so_reuseport", 0)])
     assert not _bind_twice([("grpc.so_reuseport", "0")])
-    with pytest.raises(ValueError, match="unsupported server option"):
-        pygrpc_native.server(
-            futures.ThreadPoolExecutor(1), options=[("grpc.so_reuseport", 1)]
-        )
+    assert _bind_twice([("grpc.so_reuseport", 1)])
 
 
 def test_grpcio_ignores_max_message_length() -> None:

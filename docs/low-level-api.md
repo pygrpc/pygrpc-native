@@ -38,7 +38,7 @@ pass the serialized reply to `respond`.
 
 ## Reference
 
-`NativeGrpcFront(target, methods, io_threads=2, client_key_metadata=None, call_details=False, delay_stream_headers=False, bearer_token_sha256=None, unauthenticated_message="Unauthenticated", metrics=False, keepalive_time_ms=7200000, keepalive_timeout_ms=20000, keepalive_permit_without_calls=True, max_concurrent_streams=1024, max_metadata_size=16384)`
+`NativeGrpcFront(target, methods, io_threads=2, client_key_metadata=None, call_details=False, delay_stream_headers=False, bearer_token_sha256=None, unauthenticated_message="Unauthenticated", metrics=False, keepalive_time_ms=7200000, keepalive_timeout_ms=20000, keepalive_permit_without_calls=True, max_concurrent_streams=1024, max_metadata_size=16384, reuse_port=False)`
 binds `host:port` (every address the host resolves to), `unix:path` or
 `unix:///path`. Port 0 picks a free port. `methods` lists
 `(path, server_streaming)` pairs, where a path is `/package.Service/Method`
@@ -118,7 +118,9 @@ flight; `server()` and `aio.server()` default to that.
 `max_concurrent_streams` limits the calls one connection can have open; a
 client waits for one to finish before starting another. `max_metadata_size`
 is the most request metadata, in bytes, a call may carry, counted as HTTP/2
-counts a header list; a call with more is refused.
+counts a header list; a call with more is refused. With `reuse_port=True`,
+several processes can bind the same TCP port; on Linux the kernel spreads
+connections across them.
 
 `set_fallback` lets one port serve methods you don't list: run a regular
 `grpc.Server` on a Unix socket and its methods are proxied there, with its

@@ -67,19 +67,19 @@ socket behind it. They work, but they aren't any faster, and `peer()` in
 them is the socket.
 
 Interceptors run as in grpcio, on the methods served here and on the fallback
-server. Of the server options, the message size limits, the keepalive
-settings (`grpc.keepalive_time_ms`, `grpc.keepalive_timeout_ms` and
+server. Of the server options, the message size limits, the keepalive settings
+(`grpc.keepalive_time_ms`, `grpc.keepalive_timeout_ms` and
 `grpc.keepalive_permit_without_calls`), `grpc.max_concurrent_streams` and the
 metadata size limits (`grpc.max_metadata_size` and
 `grpc.absolute_max_metadata_size`) work as in grpcio. Options that ask for
 something this server can't do raise an error: closing connections by age or
 idleness (`grpc.max_connection_age_ms`, `grpc.max_connection_age_grace_ms`,
-`grpc.max_connection_idle_ms`), `grpc.max_allowed_incoming_connections`,
-response compression and `grpc.so_reuseport`, as do `maximum_concurrent_rpcs`
-and TLS. Any other option is ignored, as grpcio ignores the many that only
-clients read. That covers the limits on client pings, which are accepted but
-not enforced, and `grpc.http2.max_frame_size`, which grpc-core's flow control
-overrides anyway. Values that aren't integers are ignored too, as in grpcio.
+`grpc.max_connection_idle_ms`), `grpc.max_allowed_incoming_connections` and
+response compression, as do `maximum_concurrent_rpcs` and TLS. Any other
+option is ignored, as grpcio ignores the many that only clients read. That
+covers the limits on client pings, which are accepted but not enforced, and
+`grpc.http2.max_frame_size`, which grpc-core's flow control overrides anyway.
+Values that aren't integers are ignored too, as in grpcio.
 
 There are two known differences. If a unary handler calls
 `send_initial_metadata()` and then fails, the metadata goes out with the
@@ -153,9 +153,9 @@ this README. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
   `aio.server()` run grpcio interceptors instead.
 - Like grpc-core, binding a Unix socket path replaces any socket file
   already there.
-- The server never sets `SO_REUSEPORT`, so binding a port another server is
-  using fails, where grpcio's default lets both bind it. `grpc.so_reuseport`
-  set to 0 is accepted; other integers raise an error.
+- The server sets `SO_REUSEPORT` only when `grpc.so_reuseport` is 1. grpcio
+  sets it by default, so binding a port another server already uses succeeds
+  with grpcio but fails here.
 - Per connection: at most 1024 concurrent streams unless
   `grpc.max_concurrent_streams` says otherwise. A connection that hasn't
   finished the HTTP/2 preface after 120 s is dropped.
