@@ -3,12 +3,17 @@
 A gRPC server for Python whose HTTP/2 and gRPC work runs in Rust, outside the
 GIL. Your handlers stay in Python.
 
-grpcio runs its own Python code for every call, under the same GIL as your
-handlers. pygrpc-native does the framing, flow control, deadlines and
-cancellation on a tokio runtime instead, and gives Python each call as an
-event: an id, the method, the request bytes and who sent it. You decode the
-protobuf, run the handler and send back the encoded response. Clients and the
-wire format are the same as with grpcio.
+When a Python gRPC server runs out of CPU, the usual fixes are running more
+server processes or rewriting the servicers in another language. pygrpc-native
+instead moves the gRPC work itself (framing, flow control, deadlines and
+cancellation) onto a tokio runtime outside the GIL, and leaves your servicers,
+interceptors and generated code alone, so Python spends its time on your code.
+`pygrpc_native.server()` and `pygrpc_native.aio.server()` take the same
+arguments as grpcio's servers, so switching is usually a one-line change, and
+nothing changes for clients.
+
+Underneath, each call reaches Python as an event: an id, the method, the
+request bytes and who sent it.
 
 ```
 grpc client ──HTTP/2──▶ tokio threads (no GIL)

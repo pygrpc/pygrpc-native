@@ -5,7 +5,7 @@ build-backend = "maturin"
 [project]
 name = "pygrpc-native"
 dynamic = ["version"]
-description = "A gRPC server in Rust that hands calls to Python handlers in batches"
+description = "A drop-in grpcio server whose HTTP/2 and gRPC work runs in Rust, outside the GIL"
 readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
