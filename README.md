@@ -17,10 +17,7 @@
 </p>
 
 <p align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/pygrpc/pygrpc-native/main/assets/how-it-works-dark.svg">
-    <img src="https://raw.githubusercontent.com/pygrpc/pygrpc-native/main/assets/how-it-works-light.svg" alt="With grpc.server(), C-core does HTTP/2 and Python handles each call's events one at a time under the GIL. With pygrpc_native.server(), Rust threads do HTTP/2 and the per-call work outside the GIL and hand calls to Python in batches." width="100%">
-  </picture>
+  <img src="https://raw.githubusercontent.com/pygrpc/pygrpc-native/main/assets/how-it-works-light.svg" alt="With grpc.server(), C-core does HTTP/2 and Python handles each call's events one at a time under the GIL. With pygrpc_native.server(), Rust threads do HTTP/2 and the per-call work outside the GIL and hand calls to Python in batches." width="100%">
 </p>
 
 When a Python gRPC server runs short of CPU, the usual answers are more server
