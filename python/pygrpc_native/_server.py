@@ -13,7 +13,6 @@ from typing import Any
 
 import grpc
 
-from pygrpc_native._grpc_args import GRPC_CORE_ARGS, UNREAD_GRPC_CORE_ARGS
 from pygrpc_native._native import EVENT_CALL, EVENT_CANCEL, NativeGrpcFront
 
 _LOGGER = logging.getLogger(__name__)
@@ -36,15 +35,23 @@ _AUTH_CONTEXT = {
     "security_level": [b"TSI_SECURITY_NONE"],
 }
 
-# Options grpcio servers take that need no work here: the server never limits
-# client pings, and grpc-core's flow control picks the frame size itself, so
-# grpcio servers advertise the same one whatever grpc.http2.max_frame_size says.
-_IGNORED_OPTIONS = UNREAD_GRPC_CORE_ARGS | {
-    "grpc.http2.max_frame_size",
-    "grpc.http2.min_ping_interval_without_data_ms",
-    "grpc.http2.max_ping_strikes",
-    "grpc.http2.max_pings_without_data",
-}
+# Options a grpcio server acts on in ways clients notice, which this server
+# can't do: closing connections by age or idleness, limiting connections, and
+# compressing responses. Any other option it doesn't take is ignored, as
+# grpcio ignores the many that only clients read.
+_UNSUPPORTED_OPTIONS = frozenset(
+    {
+        "grpc.default_compression_algorithm",
+        "grpc.default_compression_level",
+        "grpc.max_allowed_incoming_connections",
+        "grpc.max_connection_age_grace_ms",
+        "grpc.max_connection_age_ms",
+        "grpc.max_connection_idle_ms",
+        "grpc.so_reuseport",
+    }
+)
+# grpc-core's limit on request metadata when no option sets it.
+_DEFAULT_METADATA_LIMIT = 16 * 1024
 # NativeGrpcFront arguments that differ from its defaults for grpcio
 # compatibility: grpc-core servers only ping connections with calls.
 _FRONT_DEFAULTS = {"keepalive_permit_without_calls": False}
@@ -65,7 +72,8 @@ def _parse_options(
     NativeGrpcFront."""
     receive: int | None = _DEFAULT_RECEIVE_LIMIT
     send: int | None = None
-    front = dict(_FRONT_DEFAULTS)
+    soft_metadata = hard_metadata = -1
+    front: dict[str, Any] = dict(_FRONT_DEFAULTS)
     for key, value in options or ():
         # grpc-core ignores a value that isn't an integer where it reads one.
         integer = isinstance(value, int)
@@ -84,15 +92,22 @@ def _parse_options(
         elif key == "grpc.max_concurrent_streams":
             if integer and value >= 0:
                 front["max_concurrent_streams"] = min(value, 2**32 - 1)
-        elif key in _IGNORED_OPTIONS:
-            pass
-        elif key == "grpc.so_reuseport" and not (integer and value):
-            pass
-        elif key not in GRPC_CORE_ARGS:
-            # grpc-core doesn't know it, so grpcio ignores it.
-            pass
-        else:
+        elif key == "grpc.max_metadata_size":
+            if integer:
+                soft_metadata = value
+        elif key == "grpc.absolute_max_metadata_size":
+            if integer:
+                hard_metadata = value
+        elif key in _UNSUPPORTED_OPTIONS and integer and value:
             raise ValueError(f"unsupported server option {key!r}")
+    if hard_metadata >= 0 or soft_metadata >= 0:
+        # grpc-core refuses metadata over the hard limit, which is
+        # absolute_max_metadata_size or else 1.25 times max_metadata_size.
+        # It also refuses some calls between the two limits at random;
+        # this server doesn't.
+        if hard_metadata < 0:
+            hard_metadata = max(int(soft_metadata * 1.25), _DEFAULT_METADATA_LIMIT)
+        front["max_metadata_size"] = min(hard_metadata, 2**32 - 1)
     return receive, send, front
 
 

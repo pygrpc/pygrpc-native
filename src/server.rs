@@ -41,8 +41,6 @@ pub const CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
 // reaches by growing its window.
 const STREAM_WINDOW: u32 = 4 << 20;
 const CONNECTION_WINDOW: u32 = (1 << 31) - 1;
-// grpc-core's limit on request metadata.
-const MAX_HEADER_LIST_SIZE: u32 = 16 << 10;
 // grpc-core's default; a connection that never finishes the preface is dropped.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
 // grpc-core's default ping timeout: the longest a keepalive ping goes
@@ -56,6 +54,8 @@ pub struct ConnectionSettings {
     /// How many streams a client may open at once; it waits for one to
     /// finish before opening more.
     pub max_concurrent_streams: u32,
+    /// The largest header list a request may have.
+    pub max_metadata_size: u32,
 }
 
 /// When the server pings a connection to check that the client is still
@@ -919,7 +919,7 @@ pub(crate) async fn serve_connection<IO>(
         .initial_window_size(STREAM_WINDOW)
         .initial_connection_window_size(CONNECTION_WINDOW)
         .max_concurrent_streams(shared.connection.max_concurrent_streams)
-        .max_header_list_size(MAX_HEADER_LIST_SIZE)
+        .max_header_list_size(shared.connection.max_metadata_size)
         .handshake::<_, Bytes>(io);
     let mut connection = tokio::select! {
         result = tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake) => match result {

@@ -36,6 +36,7 @@ class NativeGrpcFront:
         keepalive_timeout_ms: int = 20_000,
         keepalive_permit_without_calls: bool = True,
         max_concurrent_streams: int = 1024,
+        max_metadata_size: int = 16384,
     ) -> None: ...
     @property
     def bound_port(self) -> int: ...

@@ -86,6 +86,9 @@ struct Running {
 ///         connection; it waits for one to finish before starting more.
 ///         hyper's server default is 200, but an engine keeps lookups and
 ///         transfers in flight on one connection.
+///     max_metadata_size: The most request metadata, in bytes, a call may
+///         carry; a call with more is refused. Counted as HTTP/2 counts a
+///         header list, as grpc-core does.
 ///
 /// Raises:
 ///     OSError: If the address cannot be bound.
@@ -118,6 +121,7 @@ impl NativeGrpcFront {
         keepalive_timeout_ms=20_000,
         keepalive_permit_without_calls=true,
         max_concurrent_streams=1024,
+        max_metadata_size=16384,
     ))]
     // Python keyword arguments.
     #[allow(clippy::too_many_arguments)]
@@ -135,6 +139,7 @@ impl NativeGrpcFront {
         keepalive_timeout_ms: u64,
         keepalive_permit_without_calls: bool,
         max_concurrent_streams: u32,
+        max_metadata_size: u32,
     ) -> PyResult<Self> {
         if io_threads == 0 {
             return Err(PyValueError::new_err("io_threads must be greater than 0"));
@@ -211,6 +216,7 @@ impl NativeGrpcFront {
                 ConnectionSettings {
                     keepalive,
                     max_concurrent_streams,
+                    max_metadata_size,
                 },
                 metrics.then_some(io_threads),
             )),
