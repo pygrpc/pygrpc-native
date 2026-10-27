@@ -197,6 +197,10 @@ async def _echo(request: Any, context: aio.ServicerContext) -> Any:
     return request
 
 
+async def _none(request: Any, context: aio.ServicerContext) -> Any:
+    return None
+
+
 UNARY_CASES: dict[str, Behavior] = {
     "echo": _echo,
     "metadata": _metadata,
@@ -207,6 +211,7 @@ UNARY_CASES: dict[str, Behavior] = {
     "catch_abort": _catch_abort,
     "set_code": _set_code,
     "set_code_then_raise": _set_code_then_raise,
+    "none": _none,
 }
 
 
@@ -256,6 +261,13 @@ async def _stream_metadata(
     yield request
 
 
+async def _stream_none(
+    request: Any, context: aio.ServicerContext
+) -> AsyncIterator[Any]:
+    yield request
+    yield None
+
+
 async def _headers_only(
     request: Any, context: aio.ServicerContext
 ) -> AsyncIterator[Any]:
@@ -272,6 +284,7 @@ STREAM_CASES: dict[str, Behavior] = {
     "abort_first": _stream_abort_first,
     "metadata": _stream_metadata,
     "headers_first": _headers_only,
+    "none": _stream_none,
 }
 
 

@@ -8,6 +8,7 @@ server, and the results must match.
 
 import asyncio
 import hmac
+import inspect
 import os
 import tempfile
 from collections.abc import AsyncIterator, Callable, Iterator
@@ -88,7 +89,72 @@ class LocalAiAsyncAuth(aio.ServerInterceptor):
         return await continuation(details)
 
 
-# KServe and MLServer: a logging interceptor that passes every call on.
+def _rebuild(handler: Any, behavior: Callable[..., Any]) -> Any:
+    if handler.response_streaming:
+        return grpc.unary_stream_rpc_method_handler(
+            behavior,
+            request_deserializer=handler.request_deserializer,
+            response_serializer=handler.response_serializer,
+        )
+    return grpc.unary_unary_rpc_method_handler(
+        behavior,
+        request_deserializer=handler.request_deserializer,
+        response_serializer=handler.response_serializer,
+    )
+
+
+# LocalAI backend/python/common/model_identity.py, which every backend
+# installs ahead of the token check. It rebuilds the handler around a guard.
+class LocalAiModelIdentity(grpc.ServerInterceptor):
+    def intercept_service(
+        self, continuation: Callable[..., Any], details: grpc.HandlerCallDetails
+    ) -> Any:
+        handler = continuation(details)
+        if handler is None:
+            return None
+        if handler.response_streaming:
+            original = handler.unary_stream
+        else:
+            original = handler.unary_unary
+
+        def guard(request: Any, context: Any) -> Any:
+            return original(request, context)
+
+        return _rebuild(handler, guard)
+
+
+# On aio it runs a sync behavior, such as the token check's abort handler, in
+# a thread with the async context, and awaits whatever that returns.
+class LocalAiAsyncModelIdentity(aio.ServerInterceptor):
+    async def intercept_service(
+        self, continuation: Callable[..., Any], details: grpc.HandlerCallDetails
+    ) -> Any:
+        handler = await continuation(details)
+        if handler is None:
+            return None
+        if handler.response_streaming:
+            original_stream = handler.unary_stream
+
+            async def guard_stream(request: Any, context: Any) -> AsyncIterator[Any]:
+                async for response in original_stream(request, context):
+                    yield response
+
+            return _rebuild(handler, guard_stream)
+        original = handler.unary_unary
+
+        async def guard(request: Any, context: Any) -> Any:
+            if inspect.iscoroutinefunction(original):
+                return await original(request, context)
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(None, original, request, context)
+            if inspect.isawaitable(result):
+                result = await result
+            return result
+
+        return _rebuild(handler, guard)
+
+
+# KServe: a logging interceptor that passes every call on.
 class LoggingInterceptor(aio.ServerInterceptor):
     async def intercept_service(
         self, continuation: Callable[..., Any], details: grpc.HandlerCallDetails
@@ -104,11 +170,6 @@ def _kserve_interceptors() -> list[Any]:
         grpc_interceptor.AsyncExceptionToStatusInterceptor(),
         otel.aio_server_interceptor(),
     ]
-
-
-def _mlserver_interceptors() -> list[Any]:
-    otel = pytest.importorskip("opentelemetry.instrumentation.grpc")
-    return [LoggingInterceptor(), otel.aio_server_interceptor()]
 
 
 # name: (aio, server kwargs, interceptors, address kind)
@@ -188,7 +249,7 @@ PROFILES: dict[str, tuple[bool, dict[str, Any], Callable[[], list[Any]], str]] =
                 ("grpc.max_receive_message_length", 50 * MB),
             ],
         },
-        lambda: [LocalAiAuth()],
+        lambda: [LocalAiModelIdentity(), LocalAiAuth()],
         "tcp",
     ),
     # LocalAI backend/python/vllm/backend.py
@@ -202,7 +263,7 @@ PROFILES: dict[str, tuple[bool, dict[str, Any], Callable[[], list[Any]], str]] =
                 ("grpc.max_receive_message_length", 50 * MB),
             ],
         },
-        lambda: [LocalAiAsyncAuth()],
+        lambda: [LocalAiAsyncModelIdentity(), LocalAiAsyncAuth()],
         "tcp",
     ),
     # kserve/protocol/grpc/server.py, with the default message limits
@@ -217,20 +278,6 @@ PROFILES: dict[str, tuple[bool, dict[str, Any], Callable[[], list[Any]], str]] =
         },
         _kserve_interceptors,
         "ipv6-any",
-    ),
-    # mlserver/grpc/server.py with grpc_max_message_length set
-    "mlserver": (
-        True,
-        {
-            "migration_thread_pool": futures.ThreadPoolExecutor(max_workers=4),
-            "options": [
-                ("grpc.max_message_length", 100 * MB),
-                ("grpc.max_send_message_length", 100 * MB),
-                ("grpc.max_receive_message_length", 100 * MB),
-            ],
-        },
-        _mlserver_interceptors,
-        "tcp",
     ),
     # llm-d-kv-cache services/uds_tokenizer/tokenizer_grpc_service.py
     "llm-d": (

@@ -298,7 +298,7 @@ def test_grpcio_ignores_max_message_length() -> None:
         server.stop(None)
 
 
-MAX_CONCURRENT_STREAMS, MAX_FRAME_SIZE = 0x3, 0x5
+MAX_CONCURRENT_STREAMS, MAX_FRAME_SIZE, MAX_HEADER_LIST_SIZE = 0x3, 0x5, 0x6
 
 
 def _settings(port: int) -> dict[int, int]:
@@ -329,12 +329,17 @@ def test_stream_limit() -> None:
     assert settings.get(MAX_FRAME_SIZE, 16384) == 16384
 
 
-def test_unknown_options_are_ignored_and_known_ones_rejected() -> None:
-    # grpc-core doesn't know the first (a misspelling some servers carry)
-    # and no longer reads the second, so grpcio ignores both.
+def test_options_the_server_cant_honor_are_the_only_ones_rejected() -> None:
+    # grpcio servers take all of these: a misspelling some servers carry, one
+    # grpc-core no longer reads, options only clients read (code often passes
+    # the same list to both), and HTTP/2 tuning.
     ignored = [
         ("grpc.http2.min_recv_ping_interval_without_data_ms", 10000),
         ("grpc.http2.min_time_between_pings_ms", 10000),
+        ("grpc.enable_retries", 1),
+        ("grpc.service_config", '{"methodConfig": []}'),
+        ("grpc.enable_http_proxy", 0),
+        ("grpc.http2.bdp_probe", 0),
         ("my.own.option", 1),
     ]
     server, port = _echo_server(ignored)
@@ -343,9 +348,34 @@ def test_unknown_options_are_ignored_and_known_ones_rejected() -> None:
             assert channel.unary_unary("/t.S/U")(b"x", timeout=5) == b"x"
     finally:
         server.stop(None)
-    # grpc-core knows this one, and the server can't do what it asks.
-    with pytest.raises(ValueError, match="unsupported server option"):
-        pygrpc_native.server(
-            futures.ThreadPoolExecutor(1),
-            options=[("grpc.max_connection_idle_ms", 1000)],
-        )
+    for option in [
+        ("grpc.max_connection_idle_ms", 1000),
+        ("grpc.default_compression_algorithm", 2),
+    ]:
+        with pytest.raises(ValueError, match="unsupported server option"):
+            pygrpc_native.server(futures.ThreadPoolExecutor(1), options=[option])
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        [],
+        [("grpc.max_metadata_size", 32768)],
+        [("grpc.max_metadata_size", 4096)],
+        [("grpc.absolute_max_metadata_size", 8192)],
+    ],
+)
+def test_metadata_limit_matches_grpcio(options: list[tuple[str, Any]]) -> None:
+    server, port = _echo_server(options)
+    try:
+        native = _settings(port)
+    finally:
+        server.stop(None)
+    grpcio = grpc.server(futures.ThreadPoolExecutor(1), options=options)
+    port = grpcio.add_insecure_port("127.0.0.1:0")
+    grpcio.start()
+    try:
+        expected = _settings(port)
+    finally:
+        grpcio.stop(None)
+    assert native[MAX_HEADER_LIST_SIZE] == expected[MAX_HEADER_LIST_SIZE]
