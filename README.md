@@ -1,19 +1,94 @@
-# pygrpc-native
+<p align="center">
+  <img src="https://raw.githubusercontent.com/pygrpc/pygrpc-native/main/assets/logo.png" alt="pygrpc-native" width="96">
+</p>
 
-A gRPC server for Python whose HTTP/2 and gRPC work runs in Rust, outside the
-GIL. Your handlers stay in Python.
+<h1 align="center">pygrpc-native</h1>
 
-When a Python gRPC server runs out of CPU, the usual fixes are running more
-server processes or rewriting the servicers in another language. pygrpc-native
-instead moves the gRPC work itself (framing, flow control, deadlines and
-cancellation) onto a tokio runtime outside the GIL, and leaves your servicers,
-interceptors and generated code alone, so Python spends its time on your code.
-`pygrpc_native.server()` and `pygrpc_native.aio.server()` take the same
-arguments as grpcio's servers, so switching is usually a one-line change, and
-nothing changes for clients.
+<p align="center">
+  A gRPC server for Python that does the HTTP/2 and gRPC work in Rust, outside the GIL.<br>
+  Your handlers stay in Python.
+</p>
 
-Underneath, each call reaches Python as an event: an id, the method, the
-request bytes and who sent it.
+<p align="center">
+  <a href="https://pypi.org/project/pygrpc-native/"><img src="https://img.shields.io/pypi/v/pygrpc-native?logo=pypi&logoColor=white&label=PyPI" alt="PyPI"></a>
+  <a href="https://pypi.org/project/pygrpc-native/"><img src="https://img.shields.io/pypi/pyversions/pygrpc-native?logo=python&logoColor=white" alt="Python versions"></a>
+  <a href="https://github.com/pygrpc/pygrpc-native/actions/workflows/ci.yml"><img src="https://github.com/pygrpc/pygrpc-native/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI"></a>
+  <a href="https://github.com/pygrpc/pygrpc-native/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
+</p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/pygrpc/pygrpc-native/main/assets/how-it-works-dark.svg">
+    <img src="https://raw.githubusercontent.com/pygrpc/pygrpc-native/main/assets/how-it-works-light.svg" alt="With grpc.server(), C-core does HTTP/2 and Python handles each call's events one at a time under the GIL. With pygrpc_native.server(), Rust threads do HTTP/2 and the per-call work outside the GIL and hand calls to Python in batches." width="100%">
+  </picture>
+</p>
+
+When a Python gRPC server runs short of CPU, the usual answers are more server
+processes or a rewrite in another language. pygrpc-native moves the gRPC work
+itself (HTTP/2, flow control, deadlines, cancellation) into Rust, outside the
+GIL, and leaves your servicers, interceptors and generated code as they are.
+
+- **Switching is one line.** `pygrpc_native.server()` and
+  `pygrpc_native.aio.server()` take the same arguments as grpcio's servers.
+  Clients don't change.
+- **It behaves like grpcio.** Status codes, metadata, deadlines,
+  cancellation, interceptors and `ServicerContext` work the same way. The few
+  differences are listed below, and anything else is a bug.
+- **Nothing stops working.** Methods it can't serve itself, such as
+  bidirectional streaming or server reflection, are passed to a grpcio server
+  running behind it.
+- **It's faster under load.** With an empty handler it answers about 1.5x as
+  many calls per second as grpcio from one client thread, and about 5x from
+  32. See [Benchmarks](#benchmarks).
+
+## Quick start
+
+```bash
+pip install pygrpc-native
+```
+
+Wheels are available for Linux (x86_64, aarch64) and macOS (arm64, x86_64),
+for CPython 3.10 and later.
+
+Change the line that creates the server:
+
+```diff
+ from concurrent import futures
+-import grpc
++import pygrpc_native
+
+-server = grpc.server(futures.ThreadPoolExecutor(16))
++server = pygrpc_native.server(futures.ThreadPoolExecutor(16))
+ greeter_pb2_grpc.add_GreeterServicer_to_server(Greeter(), server)
+ server.add_insecure_port("[::]:50051")
+ server.start()
+ server.wait_for_termination()
+```
+
+For `grpc.aio`:
+
+```diff
++import pygrpc_native.aio
++
+-server = grpc.aio.server()
++server = pygrpc_native.aio.server()
+ greeter_pb2_grpc.add_GreeterServicer_to_server(Greeter(), server)
+ server.add_insecure_port("[::]:50051")
+ await server.start()
+ await server.wait_for_termination()
+```
+
+To build from source:
+
+```bash
+pip install maturin
+maturin develop --release
+```
+
+## How it works
+
+Every call reaches Python as an event: an id, the method, the request bytes
+and who sent it.
 
 ```
 grpc client ──HTTP/2──▶ tokio threads (no GIL)
@@ -23,96 +98,75 @@ grpc client ──HTTP/2──▶ tokio threads (no GIL)
                           ◀── respond(call_id, bytes) from any thread
 ```
 
-Calls reach Python in batches, so a burst takes one trip across the GIL
-rather than one per call.
+Python picks up calls in batches, so a burst costs one trip across the GIL
+instead of one per call. `server()` and `aio.server()` are built on top of
+this and run your handlers the way grpcio does.
 
-## Install
+## What runs natively
 
-```bash
-pip install pygrpc-native
-```
+| | Native | grpcio fallback |
+|:--|:-:|:-:|
+| Unary and server-streaming methods | ✓ | |
+| Client-streaming and bidirectional methods | | ✓ |
+| Code generated by grpcio-tools 1.64 or later | ✓ | |
+| Code generated by older grpcio-tools, or anything else added only with `add_generic_rpc_handlers` | | ✓ |
+| Server reflection | | ✓ |
+| Interceptors | ✓ | ✓ |
 
-Wheels are published for Linux (x86_64, aarch64) and macOS (arm64,
-x86_64) and work on CPython 3.10 and later. To build from a checkout:
+The fallback is a grpcio server listening on a Unix socket behind this one.
+Calls that go there work but aren't any faster, and `peer()` in them returns
+the socket. The native server listens on a single insecure port.
 
-```bash
-pip install maturin
-maturin develop --release
-```
+<details>
+<summary><b>Server options</b></summary>
 
-## With grpcio servicers
+<br>
 
-`pygrpc_native.server()` takes the same arguments as `grpc.server()` and
-serves servicers from grpcio-tools generated code (1.64 or later) unchanged:
+| | Options |
+|:--|:--|
+| Same as grpcio | `grpc.max_receive_message_length`, `grpc.max_send_message_length`, `grpc.keepalive_time_ms`, `grpc.keepalive_timeout_ms`, `grpc.keepalive_permit_without_calls`, `grpc.max_concurrent_streams`, `grpc.max_metadata_size`, `grpc.absolute_max_metadata_size`, `grpc.so_reuseport` |
+| Raise an error | `grpc.max_connection_age_ms`, `grpc.max_connection_age_grace_ms`, `grpc.max_connection_idle_ms`, `grpc.max_allowed_incoming_connections`, response compression, `maximum_concurrent_rpcs`, TLS |
+| Ignored | Everything else. grpcio also ignores the many options that only clients read. This includes the limits on client pings, which are accepted but not enforced, and `grpc.http2.max_frame_size`, which grpc-core's flow control overrides anyway. |
 
-```python
-from concurrent import futures
-import pygrpc_native
+As in grpcio, a value that isn't an integer is ignored.
 
-server = pygrpc_native.server(futures.ThreadPoolExecutor(16))
-greeter_pb2_grpc.add_GreeterServicer_to_server(Greeter(), server)
-server.add_insecure_port("[::]:50051")
-server.start()
-server.wait_for_termination()
-```
+</details>
 
-Status codes, error messages, metadata, deadlines, cancellation and
-`ServicerContext` behave as they do in grpcio.
+<details>
+<summary><b>Known differences from grpcio</b></summary>
 
-Unary and server-streaming methods are served natively on one insecure port.
-The rest, such as client-streaming and bidirectional methods, server
-reflection, or handlers added only with `add_generic_rpc_handlers`, as code
-generated by grpcio-tools before 1.64 does, go to a grpcio server on a Unix
-socket behind it. They work, but they aren't any faster, and `peer()` in
-them is the socket.
+<br>
 
-Interceptors run as in grpcio, on the methods served here and on the fallback
-server. Of the server options, the message size limits, the keepalive settings
-(`grpc.keepalive_time_ms`, `grpc.keepalive_timeout_ms` and
-`grpc.keepalive_permit_without_calls`), `grpc.max_concurrent_streams` and the
-metadata size limits (`grpc.max_metadata_size` and
-`grpc.absolute_max_metadata_size`) work as in grpcio. Options that ask for
-something this server can't do raise an error: closing connections by age or
-idleness (`grpc.max_connection_age_ms`, `grpc.max_connection_age_grace_ms`,
-`grpc.max_connection_idle_ms`), `grpc.max_allowed_incoming_connections` and
-response compression, as do `maximum_concurrent_rpcs` and TLS. Any other
-option is ignored, as grpcio ignores the many that only clients read. That
-covers the limits on client pings, which are accepted but not enforced, and
-`grpc.http2.max_frame_size`, which grpc-core's flow control overrides anyway.
-Values that aren't integers are ignored too, as in grpcio.
+- If a unary handler calls `send_initial_metadata()` and then fails, the
+  metadata is sent along with the status, so the client sees it as trailing
+  metadata.
+- If a client doesn't answer a keepalive ping, the connection is closed after
+  `grpc.keepalive_timeout_ms`, as gRPC's keepalive docs describe. grpcio waits
+  for `grpc.http2.ping_timeout_ms` instead, which is a minute by default.
 
-There are two known differences. If a unary handler calls
-`send_initial_metadata()` and then fails, the metadata goes out with the
-status, so the client sees it as trailing metadata. And a connection whose
-client doesn't answer a keepalive ping is closed after
-`grpc.keepalive_timeout_ms`, as gRPC's keepalive documentation describes,
-while grpcio waits for `grpc.http2.ping_timeout_ms`, a minute by default.
+</details>
 
-`pygrpc_native.aio.server()` does the same for `grpc.aio.server()`:
+<details>
+<summary><b>Notes on <code>aio.server()</code></b></summary>
 
-```python
-import pygrpc_native.aio
+<br>
 
-server = pygrpc_native.aio.server()
-greeter_pb2_grpc.add_GreeterServicer_to_server(Greeter(), server)
-server.add_insecure_port("[::]:50051")
-await server.start()
-await server.wait_for_termination()
-```
+- Handlers run on the event loop that called `start()`, including uvloop.
+- `abort()` raises `grpc.aio.AbortError`. If the client cancels or the
+  deadline passes, the handler gets `asyncio.CancelledError`, as in grpc.aio.
+- Streaming handlers can yield from an async generator or call
+  `context.write()`.
+- Handlers that aren't coroutines run in `migration_thread_pool` with
+  grpcio's sync context, where `abort()` returns instead of raising.
+- The fallback, the options and the differences above are the same as for
+  the sync server.
 
-Handlers run on the event loop that called `start()`, uvloop included.
-`abort()` raises `grpc.aio.AbortError`, and a handler whose client cancels or
-whose deadline passes gets `asyncio.CancelledError`, as in grpc.aio. Streams
-can yield from an async generator or call `context.write()`, and handlers
-that aren't coroutines run in `migration_thread_pool` with grpcio's sync
-context, where `abort()` returns instead of raising. The fallback,
-the unsupported options and the known differences are the same as
-for the sync server.
+</details>
 
 ## Low-level API
 
-`NativeGrpcFront` is the layer under `server()`. Each call reaches Python as
-an event that you answer by id:
+`NativeGrpcFront` is the layer under `server()`. You receive each call as an
+event and answer it by id:
 
 ```python
 import threading
@@ -133,48 +187,65 @@ threading.Thread(target=serve).start()
 Streaming, call details, response metadata, bearer tokens and metrics are
 covered in [docs/low-level-api.md](https://github.com/pygrpc/pygrpc-native/blob/main/docs/low-level-api.md).
 
-## Compatibility
+## Benchmarks
 
-pygrpc-native follows semantic versioning, and the low-level API stays
-compatible within 0.x as well. `tests/test_api.py` pins the 0.1 names,
-signatures and event tuples of `NativeGrpcFront`: they won't change or go
-away, and new parameters only come after the existing ones, with a default.
-The keys `metrics()` returns won't be renamed or removed within 0.x either,
-though new ones may be added. `server()` and `aio.server()` follow grpcio's
-API, and any difference from grpcio's behavior is a bug unless it is listed in
-this README. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
+<p align="center">
+  <img src="https://raw.githubusercontent.com/pygrpc/pygrpc-native/main/assets/benchmark.gif" alt="benchmarks/echo.py against grpc.server(), then against pygrpc_native.server()" width="100%">
+</p>
+
+An empty unary handler on an Apple M4 Pro, called by grpcio clients on the
+same machine. Calls per second, median of three runs:
+
+| Server | 1 client thread | 32 client threads (8 processes x 4) |
+|:--|--:|--:|
+| `grpc.server()` | 7,739 | 10,955 |
+| `grpc.aio.server()` | 4,804 | 10,322 |
+| `pygrpc_native.server()` | 11,428 | 57,419 |
+| `pygrpc_native.aio.server()` | 9,444 | 58,073 |
+| Low-level API | 12,835 | 63,413 |
+
+On a 40-vCPU Linux container, the low-level API answered about 12x as many
+calls as grpcio at 32 threads. The [benchmark README](https://github.com/pygrpc/pygrpc-native/blob/main/benchmarks/README.md)
+has all the numbers and explains how they were measured.
 
 ## Limitations
 
-- `NativeGrpcFront` serves unary and server-streaming methods only; other
-  kinds can go through the fallback server. `server()` and `aio.server()`
-  send them there on their own.
-- No TLS yet. `NativeGrpcFront` checks bearer tokens itself; `server()` and
-  `aio.server()` run grpcio interceptors instead.
-- Like grpc-core, binding a Unix socket path replaces any socket file
+- `NativeGrpcFront` only serves unary and server-streaming methods. Other
+  kinds can go through the fallback server, and `server()` and `aio.server()`
+  send them there for you.
+- There's no TLS yet. `NativeGrpcFront` checks bearer tokens itself, while
+  `server()` and `aio.server()` run grpcio interceptors.
+- As with grpc-core, binding a Unix socket path replaces any socket file
   already there.
-- The server sets `SO_REUSEPORT` only when `grpc.so_reuseport` is 1. grpcio
-  sets it by default, so binding a port another server already uses succeeds
-  with grpcio but fails here.
-- Per connection: at most 1024 concurrent streams unless
+- `SO_REUSEPORT` is set only when `grpc.so_reuseport` is 1. grpcio sets it by
+  default, so binding a port that another server already uses works with
+  grpcio but fails here.
+- Each connection allows up to 1024 concurrent streams unless
   `grpc.max_concurrent_streams` says otherwise. A connection that hasn't
-  finished the HTTP/2 preface after 120 s is dropped.
-- A call with more request metadata than the limit (16 KiB unless set) is
-  refused. grpcio also refuses some calls at random between
-  `grpc.max_metadata_size` and that limit; this server doesn't.
+  finished the HTTP/2 preface within 120 s is dropped.
+- A call whose request metadata is over the limit (16 KiB unless set) is
+  refused. Between `grpc.max_metadata_size` and that limit, grpcio also
+  refuses some calls at random. This server doesn't.
 
-## Benchmarks
+## Compatibility
 
-With an empty handler on an Apple M4 Pro, `pygrpc_native.server()` answers
-about 1.5x the calls per second of `grpc.server()` from one client thread and
-about 5x from 32. On a 40-vCPU Linux container the low-level API answered
-about 12x at 32 threads. See [benchmarks](https://github.com/pygrpc/pygrpc-native/blob/main/benchmarks/README.md) for the
-numbers and how they were measured.
+pygrpc-native follows semantic versioning, and the low-level API also stays
+compatible within 0.x:
+
+- The 0.1 names, signatures and event tuples of `NativeGrpcFront` won't
+  change or go away. `tests/test_api.py` pins them. New parameters are only
+  added after the existing ones, with a default.
+- The keys that `metrics()` returns won't be renamed or removed within 0.x,
+  though new ones may be added.
+- `server()` and `aio.server()` follow grpcio's API. Any difference from
+  grpcio's behavior is a bug unless this README lists it.
+
+Changes are listed in [CHANGELOG.md](https://github.com/pygrpc/pygrpc-native/blob/main/CHANGELOG.md).
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Every commit needs a DCO sign-off
-(`git commit -s`).
+See [CONTRIBUTING.md](https://github.com/pygrpc/pygrpc-native/blob/main/CONTRIBUTING.md).
+Every commit needs a DCO sign-off (`git commit -s`).
 
 ## License
 
