@@ -176,6 +176,28 @@ class _Abort(Exception):
     pass
 
 
+class _ConcurrencyLimit:
+    def __init__(self, maximum: int | None) -> None:
+        self.maximum = maximum
+        self._active = 0
+        self._lock = threading.Lock()
+
+    def admit(self) -> bool:
+        if self.maximum is None:
+            return True
+        with self._lock:
+            if self._active >= self.maximum:
+                return False
+            self._active += 1
+            return True
+
+    def release(self) -> None:
+        if self.maximum is None:
+            return
+        with self._lock:
+            self._active -= 1
+
+
 class _Call:
     def __init__(
         self,
@@ -198,6 +220,7 @@ class _Call:
             None if time_remaining is None else time.monotonic() + time_remaining
         )
         self.lock = threading.Lock()
+        self.admitted = True
         self.active = True
         self.callbacks: list[Callable[[], None]] = []
 
@@ -387,10 +410,9 @@ class Server(_Codec, grpc.Server):
         compression: grpc.Compression | None = None,
         io_threads: int = 2,
     ) -> None:
-        if maximum_concurrent_rpcs is not None:
-            raise NotImplementedError("maximum_concurrent_rpcs isn't supported yet")
         if compression not in (None, grpc.Compression.NoCompression):
             raise NotImplementedError("response compression isn't supported")
+        self._limit = _ConcurrencyLimit(maximum_concurrent_rpcs)
         self._options = list(options or ())
         self._receive_limit, self._send_limit, self._front_args = _parse_options(
             self._options
@@ -474,7 +496,10 @@ class Server(_Codec, grpc.Server):
         assert self._front is not None
         self._fallback_dir, path = _fallback_socket()
         fallback = grpc.server(
-            self._executor, interceptors=self._interceptors, options=self._options
+            self._executor,
+            interceptors=self._interceptors,
+            options=self._options,
+            maximum_concurrent_rpcs=self._limit.maximum,
         )
         fallback.add_generic_rpc_handlers(generic)
         for service, handlers in streamed.items():
@@ -548,14 +573,27 @@ class Server(_Codec, grpc.Server):
                     )
                     method, handler = self._table[method_id]
                     call = _Call(call_id, method, handler, *details)
+                    if self._limit.maximum is not None and not self._limit.admit():
+                        # Not on a worker, so busy workers can't delay it.
+                        call.admitted = False
+                        contextvars.Context().run(self._reject_over_limit, call)
+                        continue
                     self._calls[call_id] = call
                     run = self._run_stream if call.streaming else self._run_unary
                     # Each call gets its own context, which its interceptors
                     # and handler share, as in grpcio.
-                    self._executor.submit(contextvars.Context().run, run, call, payload)
+                    future = self._executor.submit(
+                        contextvars.Context().run, run, call, payload
+                    )
+                    if self._limit.maximum is not None:
+                        future.add_done_callback(
+                            lambda _, call=call: self._release(call)
+                        )
                 except Exception:
                     _LOGGER.exception("Error dispatching call %d", call_id)
-                    self._calls.pop(call_id, None)
+                    call = self._calls.pop(call_id, None)
+                    if call is not None:
+                        self._release(call)
                     if kind == EVENT_CALL:
                         front.fail(
                             call_id,
@@ -594,6 +632,23 @@ class Server(_Codec, grpc.Server):
             return False
         return _use_handler(front, call, handler)
 
+    def _reject_over_limit(self, call: _Call) -> None:
+        try:
+            if self._intercept(call):
+                self._front.fail(  # type: ignore[union-attr]
+                    call.call_id,
+                    _code(grpc.StatusCode.RESOURCE_EXHAUSTED),
+                    "Concurrent RPC limit exceeded!",
+                )
+        finally:
+            call.terminate()
+
+    def _release(self, call: _Call) -> None:
+        with call.lock:
+            admitted, call.admitted = call.admitted, False
+        if admitted:
+            self._limit.release()
+
     def _fail(
         self, call: _Call, context: _Context, code: grpc.StatusCode, details: str
     ) -> None:
@@ -613,6 +668,7 @@ class Server(_Codec, grpc.Server):
     def _run_unary(self, call: _Call, payload: bytes) -> None:
         try:
             if not self._intercept(call):
+                self._release(call)
                 return
             ok, request = self._request(call, payload)
             if not ok:
@@ -655,6 +711,7 @@ class Server(_Codec, grpc.Server):
         responses = None
         try:
             if not self._intercept(call):
+                self._release(call)
                 return
             ok, request = self._request(call, payload)
             if not ok:

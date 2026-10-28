@@ -4,6 +4,14 @@ All notable changes are listed here. The project follows
 [semantic versioning](https://semver.org); see
 [Compatibility](README.md#compatibility) for what that covers.
 
+## Unreleased
+
+### Added
+
+- `server()` and `aio.server()` take `maximum_concurrent_rpcs`. Calls over the
+  limit get `RESOURCE_EXHAUSTED`, as with grpcio; the native methods and the
+  ones passed to the fallback server are counted separately.
+
 ## 0.5.2 (2026-10-28)
 
 ### Fixed
