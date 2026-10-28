@@ -400,9 +400,15 @@ class Server(_Codec, aio.Server):
         fallback = aio.server(
             self._executor, interceptors=self._interceptors, options=self._options
         )
-        fallback.add_generic_rpc_handlers(generic)
-        for service, handlers in streamed.items():
-            fallback.add_registered_method_handlers(service, handlers)
+        # grpc.aio ignores add_registered_method_handlers() before grpcio 1.84,
+        # so these go in as generic handlers, ahead of the others.
+        fallback.add_generic_rpc_handlers(
+            [
+                grpc.method_handlers_generic_handler(service, handlers)
+                for service, handlers in streamed.items()
+            ]
+            + list(generic)
+        )
         fallback.add_insecure_port(f"unix:{path}")
         await fallback.start()
         self._fallback = fallback

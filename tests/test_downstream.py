@@ -359,13 +359,16 @@ def _run(name: str, native: bool) -> dict[str, Any]:
         async def serve() -> dict[str, Any]:
             factory = pygrpc_native.aio.server if native else aio.server
             server = factory(**kwargs)
-            server.add_registered_method_handlers(
-                "t.S",
-                {
-                    "U": grpc.unary_unary_rpc_method_handler(_echo_async),
-                    "S": grpc.unary_stream_rpc_method_handler(_echo_stream_async),
-                },
+            handlers = {
+                "U": grpc.unary_unary_rpc_method_handler(_echo_async),
+                "S": grpc.unary_stream_rpc_method_handler(_echo_stream_async),
+            }
+            # Both, as generated code does: grpc.aio ignores registered
+            # handlers before grpcio 1.84.
+            server.add_generic_rpc_handlers(
+                (grpc.method_handlers_generic_handler("t.S", handlers),)
             )
+            server.add_registered_method_handlers("t.S", handlers)
             port = server.add_insecure_port(bind)
             await server.start()
             try:
