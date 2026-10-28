@@ -24,6 +24,7 @@ from pygrpc_native._server import (
     _NO_DEADLINE,
     _Codec,
     _code,
+    _ConcurrencyLimit,
     _fallback_socket,
     _HandlerCallDetails,
     _Metadatum,
@@ -61,6 +62,7 @@ class _Call:
             None if time_remaining is None else time.monotonic() + time_remaining
         )
         self.task: asyncio.Task[None] | None = None
+        self.admitted = True
         # The client left or the deadline passed.
         self.cancelled = False
         self.done = False
@@ -311,10 +313,11 @@ class Server(_Codec, aio.Server):
                 "Interceptor must be ServerInterceptor, "
                 f"the following are invalid: {invalid}"
             )
-        if maximum_concurrent_rpcs is not None:
-            raise NotImplementedError("maximum_concurrent_rpcs isn't supported yet")
+        if maximum_concurrent_rpcs is not None and maximum_concurrent_rpcs <= 0:
+            raise ValueError("maximum_concurrent_rpcs should be a positive integer")
         if compression not in (None, grpc.Compression.NoCompression):
             raise NotImplementedError("response compression isn't supported")
+        self._limit = _ConcurrencyLimit(maximum_concurrent_rpcs)
         self._options = list(options or ())
         self._receive_limit, self._send_limit, self._front_args = _parse_options(
             self._options
@@ -398,7 +401,10 @@ class Server(_Codec, aio.Server):
         assert self._front is not None
         self._fallback_dir, path = _fallback_socket()
         fallback = aio.server(
-            self._executor, interceptors=self._interceptors, options=self._options
+            self._executor,
+            interceptors=self._interceptors,
+            options=self._options,
+            maximum_concurrent_rpcs=self._limit.maximum,
         )
         # grpc.aio ignores add_registered_method_handlers() before grpcio 1.84,
         # so these go in as generic handlers, ahead of the others.
@@ -472,13 +478,29 @@ class Server(_Codec, aio.Server):
                 continue
             method, handler = self._table[method_id]
             call = _Call(call_id, method, handler, *details)
+            limited = self._limit.maximum is not None
+            if limited:
+                call.admitted = self._limit.admit()
             self._calls[call_id] = call
             call.task = loop.create_task(self._run(call, payload))
+            if limited and call.admitted:
+                # A task cancelled before it starts never runs its finally.
+                call.task.add_done_callback(self._release_limit)
+
+    def _release_limit(self, task: asyncio.Task[None]) -> None:
+        self._limit.release()
 
     async def _run(self, call: _Call, payload: bytes) -> None:
         context = _Context(self, call)
         try:
             if self._interceptors and not await self._intercept(call):
+                return
+            if not call.admitted:
+                self._front.fail(  # type: ignore[union-attr]
+                    call.call_id,
+                    _code(grpc.StatusCode.RESOURCE_EXHAUSTED),
+                    "Concurrent RPC limit exceeded!",
+                )
                 return
             ok, request = self._request(call, payload)
             if not ok:
