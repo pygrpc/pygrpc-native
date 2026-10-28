@@ -33,11 +33,19 @@ jobs:
       - run: cargo test --locked --no-default-features
 
   python:
+    # Keeps the names of the jobs that branch protection requires.
+    name: python (${{ matrix.os }}, ${{ matrix.python }}${{ matrix.grpcio && format(', grpcio {0}', matrix.grpcio) || '' }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
         python: ["3.10", "3.13"]
+        grpcio: [""]
+        include:
+          # The first grpcio whose generated code adds registered handlers.
+          - os: ubuntu-latest
+            python: "3.10"
+            grpcio: "1.64.3"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -47,9 +55,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build and install
         run: |
-          python -m pip install maturin pytest grpcio grpcio-tools grpcio-health-checking grpcio-reflection uvloop
+          if [ -n "${{ matrix.grpcio }}" ]; then pin="==${{ matrix.grpcio }}"; fi
+          python -m pip install maturin pytest uvloop "grpcio$pin" "grpcio-tools$pin" "grpcio-health-checking$pin" "grpcio-reflection$pin"
           # Interceptor libraries that downstream servers use, for tests/test_downstream.py.
           python -m pip install grpc-interceptor opentelemetry-instrumentation-grpc
+          if [ -n "$pin" ]; then
+            python -c "import grpc; assert grpc.__version__ == '${{ matrix.grpcio }}', grpc.__version__"
+          fi
           maturin build --release --locked --out dist
           python -m pip install dist/*.whl
       - run: pytest -q tests
