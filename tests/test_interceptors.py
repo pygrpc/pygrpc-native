@@ -353,9 +353,13 @@ def test_aio_interceptors_see_unknown_methods() -> None:
 
     async def results(factory: Any) -> dict[str, Any]:
         server = factory(interceptors=[AioAuth(False)])
-        server.add_registered_method_handlers(
-            "i.S", {"Unary": grpc.unary_unary_rpc_method_handler(unary)}
+        handlers = {"Unary": grpc.unary_unary_rpc_method_handler(unary)}
+        # Both, as generated code does: grpc.aio ignores registered handlers
+        # before grpcio 1.84.
+        server.add_generic_rpc_handlers(
+            (grpc.method_handlers_generic_handler("i.S", handlers),)
         )
+        server.add_registered_method_handlers("i.S", handlers)
         port = server.add_insecure_port("127.0.0.1:0")
         await server.start()
         try:

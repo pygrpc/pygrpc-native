@@ -656,6 +656,11 @@ def test_sync_handlers_get_grpcio_sync_context() -> None:
 
     async def run(factory: Any, stream_abort: bool) -> dict[str, Any]:
         server = factory(futures.ThreadPoolExecutor(2))
+        # Both, as generated code does: grpc.aio ignores registered handlers
+        # before grpcio 1.84.
+        server.add_generic_rpc_handlers(
+            (grpc.method_handlers_generic_handler("s.S", handlers),)
+        )
         server.add_registered_method_handlers("s.S", handlers)
         port = server.add_insecure_port("127.0.0.1:0")
         await server.start()
