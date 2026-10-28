@@ -4,6 +4,14 @@ All notable changes are listed here. The project follows
 [semantic versioning](https://semver.org); see
 [Compatibility](README.md#compatibility) for what that covers.
 
+## 0.5.2 (2026-10-28)
+
+### Fixed
+
+- On grpcio 1.64 through 1.83, the aio server answered client-streaming and
+  bidirectional methods of generated code with `UNIMPLEMENTED`. They now reach
+  the grpcio fallback. (#69)
+
 ## 0.5.1 (2026-10-27)
 
 ### Fixed
