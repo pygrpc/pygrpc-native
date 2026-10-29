@@ -33,7 +33,8 @@ use tonic::{Code, Status};
 
 use server::{
     accept_loop, AddMethodsError, Answer, BearerAuth, CallDetails, ClientKey, ConnectionSettings,
-    Event, Keepalive, Listener, MetadataValue, Shared, CONNECTION_DRAIN_TIMEOUT, MAX_RESOLVED,
+    Event, Keepalive, Listener, MetadataValue, Shared, CALL_DRAIN_TIMEOUT,
+    CONNECTION_DRAIN_TIMEOUT, MAX_RESOLVED,
 };
 
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
@@ -562,9 +563,9 @@ impl NativeGrpcFront {
             let shared = self.shared.clone();
             py.detach(move || {
                 // Let connections send GOAWAY before the runtime goes away.
-                running
-                    .runtime
-                    .block_on(shared.wait_connections_closed(CONNECTION_DRAIN_TIMEOUT));
+                running.runtime.block_on(
+                    shared.wait_connections_closed(CALL_DRAIN_TIMEOUT + CONNECTION_DRAIN_TIMEOUT),
+                );
                 running.runtime.shutdown_timeout(RUNTIME_SHUTDOWN_TIMEOUT);
             });
             self.remove_socket_file();
