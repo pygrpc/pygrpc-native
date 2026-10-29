@@ -419,3 +419,31 @@ def test_rejected_call_does_not_hold_up_stop(pb: tuple[Any, Any]) -> None:
     start = time.monotonic()
     assert server.stop(5).wait(10)
     assert time.monotonic() - start < 1
+
+
+def test_a_client_that_stops_reading_stops_the_handler() -> None:
+    produced = 0
+
+    def endless(request: bytes, context: Any) -> Iterator[bytes]:
+        nonlocal produced
+        while context.is_active():
+            produced += 1
+            yield b"x" * (64 << 10)
+
+    server = pygrpc_native.server(futures.ThreadPoolExecutor(2))
+    server.add_registered_method_handlers(
+        "t.S", {"S": grpc.unary_stream_rpc_method_handler(endless)}
+    )
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            call = channel.unary_stream("/t.S/S")(b"", timeout=10)
+            next(call)
+            time.sleep(0.6)
+            stalled = produced
+            time.sleep(0.6)
+            assert produced == stalled
+            call.cancel()
+    finally:
+        server.stop(None)

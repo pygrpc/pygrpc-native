@@ -442,7 +442,7 @@ impl NativeGrpcFront {
             return false;
         };
         let payload = Bytes::from_owner(payload);
-        py.detach(|| sender.blocking_send(payload).is_ok())
+        py.detach(|| sender.blocking_send(&self.handle, payload))
     }
 
     /// ``stream_send`` without blocking, for callers on an event loop.
@@ -472,7 +472,7 @@ impl NativeGrpcFront {
             Err(TrySendError::Full(payload)) => {
                 let shared = self.shared.clone();
                 self.handle.spawn(async move {
-                    let sent = sender.send(payload).await.is_ok();
+                    let sent = sender.send(payload).await;
                     shared.writable(call_id, sent);
                 });
                 STREAM_PARKED

@@ -22,14 +22,19 @@ use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::sync::{mpsc, oneshot, watch, Notify};
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{mpsc, oneshot, watch, Notify, Semaphore, TryAcquireError};
 use tonic::codec::{Codec, CompressionEncoding, DecodeBuf, Decoder, EncodeBuf, Encoder};
 use tonic::server::{Grpc, ServerStreamingService, UnaryService};
 use tonic::{Code, Status};
 
 use crate::metrics::{self, Metrics};
 
-const STREAM_READ_AHEAD: usize = 1;
+// A stream queues messages until they add up to STREAM_BUDGET bytes, so small
+// messages don't each wait for the last one to go out. A larger message goes
+// alone.
+const STREAM_BUDGET: usize = 256 * 1024;
+const STREAM_QUEUE: usize = 64;
 // The compressed flag and length in front of every gRPC message.
 const GRPC_HEADER_LEN: u64 = 5;
 // Enough to flush GOAWAY. grpcio clients keep an idle connection open after
@@ -157,8 +162,57 @@ enum StreamEnd {
     Status(Status),
 }
 
-pub(crate) struct StreamSlot {
+/// Where a stream's messages go, holding room for them in the stream's budget.
+#[derive(Clone)]
+pub struct StreamSender {
     sender: mpsc::Sender<Bytes>,
+    room: Arc<Semaphore>,
+}
+
+fn room_for(message: &Bytes) -> u32 {
+    message.len().clamp(1, STREAM_BUDGET) as u32
+}
+
+impl StreamSender {
+    /// Waits while the stream is full; false once it has ended.
+    pub fn blocking_send(&self, runtime: &tokio::runtime::Handle, message: Bytes) -> bool {
+        let room = room_for(&message);
+        match self.room.try_acquire_many(room) {
+            Ok(permit) => permit.forget(),
+            Err(TryAcquireError::Closed) => return false,
+            Err(TryAcquireError::NoPermits) => {
+                match runtime.block_on(self.room.acquire_many(room)) {
+                    Ok(permit) => permit.forget(),
+                    Err(_) => return false,
+                }
+            }
+        }
+        self.sender.blocking_send(message).is_ok()
+    }
+
+    pub fn try_send(&self, message: Bytes) -> Result<(), TrySendError<Bytes>> {
+        let room = room_for(&message);
+        match self.room.try_acquire_many(room) {
+            Ok(permit) => permit.forget(),
+            Err(TryAcquireError::NoPermits) => return Err(TrySendError::Full(message)),
+            Err(TryAcquireError::Closed) => return Err(TrySendError::Closed(message)),
+        }
+        self.sender.try_send(message).inspect_err(|_| {
+            self.room.add_permits(room as usize);
+        })
+    }
+
+    pub async fn send(&self, message: Bytes) -> bool {
+        match self.room.acquire_many(room_for(&message)).await {
+            Ok(permit) => permit.forget(),
+            Err(_) => return false,
+        }
+        self.sender.send(message).await.is_ok()
+    }
+}
+
+pub(crate) struct StreamSlot {
+    sender: StreamSender,
     end: Arc<Mutex<StreamEnd>>,
     // With delay_stream_headers, releases the response headers; an Err ends
     // the call before any message, as a trailers-only response.
@@ -372,13 +426,13 @@ impl Shared {
         }
     }
 
-    pub fn stream_sender(&self, call_id: u64) -> Option<mpsc::Sender<Bytes>> {
+    pub fn stream_sender(&self, call_id: u64) -> Option<StreamSender> {
         let streams = self.streams.lock().unwrap();
         streams.get(&call_id).map(|slot| slot.sender.clone())
     }
 
     /// The sender for a stream's next message, releasing its headers first.
-    pub fn message_sender(&self, call_id: u64) -> Option<mpsc::Sender<Bytes>> {
+    pub fn message_sender(&self, call_id: u64) -> Option<StreamSender> {
         let mut streams = self.streams.lock().unwrap();
         let slot = streams.get_mut(&call_id)?;
         if let Some(start) = slot.start.take() {
@@ -743,6 +797,7 @@ impl UnaryService<Bytes> for UnaryCall {
 /// connection closed) tells Python to close the handler's stream.
 pub(crate) struct ResponseStream {
     receiver: mpsc::Receiver<Bytes>,
+    room: Arc<Semaphore>,
     end: Arc<Mutex<StreamEnd>>,
     shared: Arc<Shared>,
     call_id: u64,
@@ -767,7 +822,10 @@ impl Stream for ResponseStream {
             }
         }
         match self.receiver.poll_recv(cx) {
-            Poll::Ready(Some(message)) => Poll::Ready(Some(Ok(message))),
+            Poll::Ready(Some(message)) => {
+                self.room.add_permits(room_for(&message) as usize);
+                Poll::Ready(Some(Ok(message)))
+            }
             Poll::Ready(None) => {
                 self.done = true;
                 let end = std::mem::replace(&mut *self.end.lock().unwrap(), StreamEnd::Ok);
@@ -784,6 +842,8 @@ impl Stream for ResponseStream {
 
 impl Drop for ResponseStream {
     fn drop(&mut self) {
+        // Wakes senders waiting for room.
+        self.room.close();
         let was_open = self
             .shared
             .streams
@@ -827,7 +887,8 @@ impl ServerStreamingService<Bytes> for StreamingCall {
             .map(|deadline| Box::pin(tokio::time::sleep_until(deadline)));
         Box::pin(async move {
             let call_id = shared.next_call_id();
-            let (sender, receiver) = mpsc::channel(STREAM_READ_AHEAD);
+            let (sender, receiver) = mpsc::channel(STREAM_QUEUE);
+            let room = Arc::new(Semaphore::new(STREAM_BUDGET));
             let end = Arc::new(Mutex::new(StreamEnd::Open));
             let (start, started) = if shared.delay_stream_headers {
                 let (start, started) = oneshot::channel();
@@ -836,13 +897,17 @@ impl ServerStreamingService<Bytes> for StreamingCall {
                 (None, None)
             };
             let slot = StreamSlot {
-                sender,
+                sender: StreamSender {
+                    sender,
+                    room: room.clone(),
+                },
                 end: end.clone(),
                 start,
             };
             shared.streams.lock().unwrap().insert(call_id, slot);
             let stream = ResponseStream {
                 receiver,
+                room,
                 end,
                 shared: shared.clone(),
                 call_id,
