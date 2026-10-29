@@ -14,10 +14,11 @@ import grpc
 from grpc import aio
 
 from pygrpc_native._native import (
-    EVENT_CANCEL,
     _EVENT_RESOLVE,
+    _EVENT_WRITABLE,
+    _STREAM_PARKED,
+    EVENT_CANCEL,
     STREAM_CLOSED,
-    STREAM_FULL,
     NativeGrpcFront,
 )
 from pygrpc_native._server import (
@@ -74,6 +75,7 @@ class _Call:
         self.cancelled = False
         self.done = False
         self.callbacks: list[Callable[[Any], None]] = []
+        self.writable: asyncio.Future[bool] | None = None
 
     def cancel(self) -> None:
         self.cancelled = True
@@ -535,6 +537,11 @@ class Server(_Codec, _Methods, aio.Server):
                 if call is not None:
                     call.cancel()
                 continue
+            if kind == _EVENT_WRITABLE:
+                call = self._calls.get(call_id)
+                if call is not None and call.writable is not None:
+                    call.writable.set_result(payload)
+                continue
             if kind == _EVENT_RESOLVE:
                 try:
                     self._resolve(call_id, payload, details[0])
@@ -755,13 +762,13 @@ class Server(_Codec, _Methods, aio.Server):
         if data is None:
             return False
         context._initial_sent = True
-        sent = front.stream_try_send(call.call_id, data)
-        if sent == STREAM_FULL:
-            # The client is behind; wait for room off the loop.
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(
-                None, front.stream_send, call.call_id, data
-            )
+        sent = front._stream_send_or_park(call.call_id, data)
+        if sent == _STREAM_PARKED:
+            call.writable = asyncio.get_running_loop().create_future()
+            try:
+                return await call.writable
+            finally:
+                call.writable = None
         return sent != STREAM_CLOSED
 
 

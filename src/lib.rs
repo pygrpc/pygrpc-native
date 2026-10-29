@@ -42,9 +42,11 @@ const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const EVENT_CALL: u8 = 0;
 const EVENT_CANCEL: u8 = 1;
 const EVENT_RESOLVE: u8 = 2;
+const EVENT_WRITABLE: u8 = 3;
 const STREAM_SENT: u8 = 0;
 const STREAM_FULL: u8 = 1;
 const STREAM_CLOSED: u8 = 2;
+const STREAM_PARKED: u8 = 3;
 
 struct Running {
     runtime: Runtime,
@@ -105,6 +107,7 @@ struct NativeGrpcFront {
     shared: Arc<Shared>,
     events: Receiver<Event>,
     running: Mutex<Option<Running>>,
+    handle: tokio::runtime::Handle,
     bound_port: u16,
     socket_path: Option<PathBuf>,
 }
@@ -228,6 +231,7 @@ impl NativeGrpcFront {
                 metrics.then_some(io_threads),
             )),
             events,
+            handle: runtime.handle().clone(),
             running: Mutex::new(Some(Running {
                 runtime,
                 listeners,
@@ -466,6 +470,27 @@ impl NativeGrpcFront {
         }
     }
 
+    /// Internal to ``aio.server()``: ``stream_try_send`` that holds a message
+    /// that doesn't fit, then sends _EVENT_WRITABLE (call id, sent).
+    #[pyo3(name = "_stream_send_or_park")]
+    fn stream_send_or_park(&self, call_id: u64, payload: PyBackedBytes) -> u8 {
+        let Some(sender) = self.shared.message_sender(call_id) else {
+            return STREAM_CLOSED;
+        };
+        match sender.try_send(Bytes::from_owner(payload)) {
+            Ok(()) => STREAM_SENT,
+            Err(TrySendError::Full(payload)) => {
+                let shared = self.shared.clone();
+                self.handle.spawn(async move {
+                    let sent = sender.send(payload).await.is_ok();
+                    shared.writable(call_id, sent);
+                });
+                STREAM_PARKED
+            }
+            Err(TrySendError::Closed(_)) => STREAM_CLOSED,
+        }
+    }
+
     /// Send a stream's response headers now, with this metadata. Only for a
     /// server created with ``delay_stream_headers=True``.
     ///
@@ -698,6 +723,9 @@ fn event_tuple<'py>(py: Python<'py>, event: Event) -> PyResult<Bound<'py, PyTupl
         Event::Resolve {
             resolve_id, path, ..
         } => (EVENT_RESOLVE, resolve_id, 0u32, path, py.None()).into_pyobject(py),
+        Event::Writable { call_id, sent } => {
+            (EVENT_WRITABLE, call_id, 0u32, sent, py.None()).into_pyobject(py)
+        }
         Event::Closed => Err(PyRuntimeError::new_err("unexpected close event")),
     }
 }
@@ -859,6 +887,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("EVENT_CANCEL", EVENT_CANCEL)?;
     m.add("_EVENT_RESOLVE", EVENT_RESOLVE)?;
     m.add("_MAX_RESOLVED", MAX_RESOLVED)?;
+    m.add("_EVENT_WRITABLE", EVENT_WRITABLE)?;
+    m.add("_STREAM_PARKED", STREAM_PARKED)?;
     m.add("STREAM_SENT", STREAM_SENT)?;
     m.add("STREAM_FULL", STREAM_FULL)?;
     m.add("STREAM_CLOSED", STREAM_CLOSED)?;
