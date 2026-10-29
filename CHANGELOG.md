@@ -4,6 +4,18 @@ All notable changes are listed here. The project follows
 [semantic versioning](https://semver.org); see
 [Compatibility](README.md#compatibility) for what that covers.
 
+## 0.6.1 (2026-10-29)
+
+### Changed
+
+- A server-streaming call queues messages until they add up to 256 KiB
+  before the handler waits for the client, instead of queueing one message.
+  Streams of small messages use much less server CPU; a message over 256 KiB
+  still goes alone, and a client that stops reading still stops the handler.
+  (#85)
+- On `aio.server()`, a stream write that has to wait for room waits on the
+  event loop instead of a worker thread. (#83)
+
 ## 0.6.0 (2026-10-29)
 
 ### Added
