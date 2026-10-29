@@ -9,8 +9,8 @@ All notable changes are listed here. The project follows
 ### Added
 
 - `server()` and `aio.server()` take `maximum_concurrent_rpcs`. Calls over the
-  limit get `RESOURCE_EXHAUSTED`, as with grpcio; the native methods and the
-  ones passed to the fallback server are counted separately.
+  limit get `RESOURCE_EXHAUSTED`, as with grpcio, and the methods on the
+  fallback server count against the same limit.
 
 ## 0.5.2 (2026-10-28)
 

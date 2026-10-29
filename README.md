@@ -220,9 +220,10 @@ has all the numbers and explains how they were measured.
 - Each connection allows up to 1024 concurrent streams unless
   `grpc.max_concurrent_streams` says otherwise. A connection that hasn't
   finished the HTTP/2 preface within 120 s is dropped.
-- `maximum_concurrent_rpcs` counts the methods served natively and the ones
-  passed to the fallback server separately, so up to twice the limit can run
-  when both kinds are busy.
+- `maximum_concurrent_rpcs` counts a call to a method on the fallback server
+  only while its handler runs, while grpcio also counts calls waiting for a
+  worker. With `server()`, such a call over the limit is refused when a worker
+  picks it up rather than as it arrives.
 - A call whose request metadata is over the limit (16 KiB unless set) is
   refused. Between `grpc.max_metadata_size` and that limit, grpcio also
   refuses some calls at random. This server doesn't.
