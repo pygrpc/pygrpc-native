@@ -278,12 +278,8 @@ impl NativeGrpcFront {
         })
     }
 
-    /// Internal to ``server()`` and ``aio.server()``: before forwarding a call
-    /// to a method not registered, send an _EVENT_RESOLVE event (resolve id,
-    /// method path) and wait for ``_resolved()``. Call before ``start()``.
-    ///
-    /// Raises:
-    ///     RuntimeError: After ``start()``.
+    /// Internal to ``server()`` and ``aio.server()``: ask with _EVENT_RESOLVE
+    /// (resolve id, path) before forwarding an unknown method. Before ``start()``.
     #[pyo3(name = "_resolve_unknown_methods")]
     fn resolve_unknown_methods(&self) -> PyResult<()> {
         if self.shared.resolve_unknown_methods() {
@@ -293,14 +289,8 @@ impl NativeGrpcFront {
         }
     }
 
-    /// Serve the method natively as ``method_id``, which follows the
-    /// registered ids (at most _MAX_RESOLVED more), or forward it with None.
-    /// Native methods are always remembered; others only with ``remember``.
-    ///
-    /// Returns False if the call that asked is gone.
-    ///
-    /// Raises:
-    ///     ValueError: If ``method_id`` is out of that range.
+    /// Answers _EVENT_RESOLVE: serve natively as ``method_id``, or forward
+    /// with None. Native answers are always remembered.
     #[pyo3(
         name = "_resolved",
         signature = (resolve_id, method_id, server_streaming=false, remember=true)
