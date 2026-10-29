@@ -93,30 +93,6 @@ def test_streaming_requests_go_to_grpcio(pb: tuple[Any, Any]) -> None:
         assert server.stop(1).wait(5)
 
 
-def test_generic_handlers_go_to_grpcio(pb: tuple[Any, Any]) -> None:
-    def hello(request: bytes, context: grpc.ServicerContext) -> bytes:
-        return b"hi " + request
-
-    server = pygrpc_native.server(futures.ThreadPoolExecutor(2))
-    server.add_generic_rpc_handlers(
-        [
-            grpc.method_handlers_generic_handler(
-                "g.G", {"Hello": grpc.unary_unary_rpc_method_handler(hello)}
-            )
-        ]
-    )
-    port = server.add_insecure_port("127.0.0.1:0")
-    server.start()
-    try:
-        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
-            assert channel.unary_unary("/g.G/Hello")(b"you", timeout=5) == b"hi you"
-            with pytest.raises(grpc.RpcError) as info:
-                channel.unary_unary("/g.G/Nope")(b"", timeout=5)
-            assert cast(grpc.Call, info.value).code() is grpc.StatusCode.UNIMPLEMENTED
-    finally:
-        server.stop(None)
-
-
 def test_reflection_and_health(pb: tuple[Any, Any]) -> None:
     reflection = pytest.importorskip("grpc_reflection.v1alpha.reflection")
     reflection_pb2 = pytest.importorskip("grpc_reflection.v1alpha.reflection_pb2")

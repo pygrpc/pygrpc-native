@@ -10,7 +10,7 @@ use std::future::{poll_fn, Future};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
@@ -104,7 +104,26 @@ pub enum Event {
     Cancel {
         call_id: u64,
     },
+    /// A call to a method not in the table; see `resolve_unknown_methods`.
+    Resolve {
+        resolve_id: u64,
+        path: String,
+        details: Option<Box<CallDetails>>,
+    },
     Closed,
+}
+
+pub const MAX_RESOLVED: usize = 1024;
+
+/// `(method_id, server_streaming)` of a method served natively.
+type NativeMethod = (u32, bool);
+/// A call's method path and where to send its answer.
+type Resolving = (String, oneshot::Sender<Option<NativeMethod>>);
+
+#[derive(Clone, Copy)]
+enum Resolved {
+    Native(u32, bool),
+    Fallback,
 }
 
 pub struct Answer {
@@ -200,6 +219,9 @@ pub struct Shared {
     connections: AtomicUsize,
     connections_done: Notify,
     fallback: OnceLock<PathBuf>,
+    resolve_unknown: AtomicBool,
+    resolved: RwLock<HashMap<String, Resolved>>,
+    resolving: Mutex<HashMap<u64, Resolving>>,
     client_key_metadata: Option<String>,
     call_details: bool,
     delay_stream_headers: bool,
@@ -234,6 +256,9 @@ impl Shared {
             connections: AtomicUsize::new(0),
             connections_done: Notify::new(),
             fallback: OnceLock::new(),
+            resolve_unknown: AtomicBool::new(false),
+            resolved: RwLock::new(HashMap::new()),
+            resolving: Mutex::new(HashMap::new()),
             client_key_metadata,
             call_details,
             delay_stream_headers,
@@ -272,6 +297,43 @@ impl Shared {
             let names = pending.iter().map(|(path, _)| path.clone()).collect();
             let _ = self.metrics.set(Metrics::new(names, shards));
         }
+    }
+
+    pub fn resolve_unknown_methods(&self) -> bool {
+        let _pending = self.pending_methods.lock().unwrap();
+        if self.methods.get().is_some() {
+            return false;
+        }
+        self.resolve_unknown.store(true, Ordering::Relaxed);
+        true
+    }
+
+    pub fn resolved(
+        &self,
+        resolve_id: u64,
+        method: Option<NativeMethod>,
+        remember: bool,
+    ) -> Result<bool, String> {
+        if let Some((id, _)) = method {
+            let first = self.methods.get().map_or(0, HashMap::len);
+            if (id as usize) < first || id as usize >= first + MAX_RESOLVED {
+                return Err(format!(
+                    "method id {id} is outside {first}..{}",
+                    first + MAX_RESOLVED
+                ));
+            }
+        }
+        let Some((path, sender)) = self.resolving.lock().unwrap().remove(&resolve_id) else {
+            return Ok(false);
+        };
+        if remember || method.is_some() {
+            let route = match method {
+                Some((id, streaming)) => Resolved::Native(id, streaming),
+                None => Resolved::Fallback,
+            };
+            self.resolved.write().unwrap().insert(path, route);
+        }
+        Ok(sender.send(method).is_ok())
     }
 
     pub fn metrics_enabled(&self) -> bool {
@@ -361,6 +423,7 @@ impl Shared {
         for (_, slot) in streams {
             slot.finish(StreamEnd::Status(shutting_down()));
         }
+        self.resolving.lock().unwrap().clear();
     }
 
     pub async fn wait_connections_closed(&self, timeout: Duration) {
@@ -836,7 +899,28 @@ async fn route(
             return Status::unauthenticated(auth.message.clone()).into_http();
         }
     }
-    let method = lookup(&request);
+    // The deadline runs from when the headers arrive, so it also covers a
+    // request body that is slow to come.
+    let deadline = call_timeout(request.headers()).map(|t| tokio::time::Instant::now() + t);
+    let mut method = lookup(&request);
+    if method.is_none() && shared.resolve_unknown.load(Ordering::Relaxed) {
+        let resolve = resolve(&shared, &peer, &request, deadline);
+        let resolved = match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, resolve)
+                .await
+                .unwrap_or_else(|_| Err(deadline_exceeded())),
+            None => resolve.await,
+        };
+        method = match resolved {
+            Ok(method) => method,
+            Err(status) => {
+                if let Some(call) = call {
+                    call.start(None);
+                }
+                return status.into_http();
+            }
+        };
+    }
     let Some((method_id, streaming)) = method else {
         return match shared.fallback.get() {
             // The fallback server counts these calls itself.
@@ -852,9 +936,6 @@ async fn route(
     if let Some(call) = call {
         call.start(Some(method_id));
     }
-    // The deadline runs from when the headers arrive, so it also covers a
-    // request body that is slow to come.
-    let deadline = call_timeout(request.headers()).map(|t| tokio::time::Instant::now() + t);
     let sizes = call.map(|call| call.sizes.clone());
     let response = async {
         if streaming {
@@ -881,6 +962,41 @@ async fn route(
             .unwrap_or_else(|_| deadline_exceeded().into_http()),
         None => response.await,
     }
+}
+
+/// How a method missing from the table is served, asking Python the first
+/// time; None is the fallback.
+async fn resolve(
+    shared: &Arc<Shared>,
+    peer: &Arc<str>,
+    request: &http::Request<RequestBody>,
+    deadline: Option<tokio::time::Instant>,
+) -> Result<Option<NativeMethod>, Status> {
+    let path = request.uri().path();
+    if let Some(resolved) = shared.resolved.read().unwrap().get(path) {
+        return Ok(match *resolved {
+            Resolved::Native(id, streaming) => Some((id, streaming)),
+            Resolved::Fallback => None,
+        });
+    }
+    let resolve_id = shared.next_call_id();
+    let (sender, answer) = oneshot::channel();
+    shared
+        .resolving
+        .lock()
+        .unwrap()
+        .insert(resolve_id, (path.to_owned(), sender));
+    if shared.is_closed() {
+        shared.resolving.lock().unwrap().remove(&resolve_id);
+        return Err(shutting_down());
+    }
+    let metadata = tonic::metadata::MetadataMap::from_headers(request.headers().clone());
+    let _ = shared.events.send(Event::Resolve {
+        resolve_id,
+        path: path.to_owned(),
+        details: call_details(shared, &metadata, peer, deadline),
+    });
+    answer.await.map_err(|_| shutting_down())
 }
 
 /// Lets close() wait for every connection's GOAWAY.

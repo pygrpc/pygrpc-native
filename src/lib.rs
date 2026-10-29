@@ -33,13 +33,14 @@ use tonic::{Code, Status};
 
 use server::{
     accept_loop, AddMethodsError, Answer, BearerAuth, CallDetails, ClientKey, ConnectionSettings,
-    Event, Keepalive, Listener, MetadataValue, Shared, CONNECTION_DRAIN_TIMEOUT,
+    Event, Keepalive, Listener, MetadataValue, Shared, CONNECTION_DRAIN_TIMEOUT, MAX_RESOLVED,
 };
 
 const RUNTIME_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 const EVENT_CALL: u8 = 0;
 const EVENT_CANCEL: u8 = 1;
+const EVENT_RESOLVE: u8 = 2;
 const STREAM_SENT: u8 = 0;
 const STREAM_FULL: u8 = 1;
 const STREAM_CLOSED: u8 = 2;
@@ -270,6 +271,49 @@ impl NativeGrpcFront {
                 PyValueError::new_err(format!("method {path} is already registered"))
             }
         })
+    }
+
+    /// Internal to ``server()`` and ``aio.server()``: before forwarding a call
+    /// to a method not registered, send an _EVENT_RESOLVE event (resolve id,
+    /// method path) and wait for ``_resolved()``. Call before ``start()``.
+    ///
+    /// Raises:
+    ///     RuntimeError: After ``start()``.
+    #[pyo3(name = "_resolve_unknown_methods")]
+    fn resolve_unknown_methods(&self) -> PyResult<()> {
+        if self.shared.resolve_unknown_methods() {
+            Ok(())
+        } else {
+            Err(PyRuntimeError::new_err("server already started"))
+        }
+    }
+
+    /// Serve the method natively as ``method_id``, which follows the
+    /// registered ids (at most _MAX_RESOLVED more), or forward it with None.
+    /// Native methods are always remembered; others only with ``remember``.
+    ///
+    /// Returns False if the call that asked is gone.
+    ///
+    /// Raises:
+    ///     ValueError: If ``method_id`` is out of that range.
+    #[pyo3(
+        name = "_resolved",
+        signature = (resolve_id, method_id, server_streaming=false, remember=true)
+    )]
+    fn resolved(
+        &self,
+        resolve_id: u64,
+        method_id: Option<u32>,
+        server_streaming: bool,
+        remember: bool,
+    ) -> PyResult<bool> {
+        self.shared
+            .resolved(
+                resolve_id,
+                method_id.map(|id| (id, server_streaming)),
+                remember,
+            )
+            .map_err(PyValueError::new_err)
     }
 
     /// Start accepting connections.
@@ -650,6 +694,9 @@ fn event_tuple<'py>(py: Python<'py>, event: Event) -> PyResult<Bound<'py, PyTupl
         Event::Cancel { call_id } => {
             (EVENT_CANCEL, call_id, 0u32, py.None(), py.None()).into_pyobject(py)
         }
+        Event::Resolve {
+            resolve_id, path, ..
+        } => (EVENT_RESOLVE, resolve_id, 0u32, path, py.None()).into_pyobject(py),
         Event::Closed => Err(PyRuntimeError::new_err("unexpected close event")),
     }
 }
@@ -657,6 +704,10 @@ fn event_tuple<'py>(py: Python<'py>, event: Event) -> PyResult<Bound<'py, PyTupl
 fn event_details_tuple<'py>(py: Python<'py>, event: Event) -> PyResult<Bound<'py, PyTuple>> {
     let details = match &event {
         Event::Call {
+            details: Some(details),
+            ..
+        }
+        | Event::Resolve {
             details: Some(details),
             ..
         } => details_tuple(py, details)?.into_any(),
@@ -805,6 +856,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<NativeGrpcFront>()?;
     m.add("EVENT_CALL", EVENT_CALL)?;
     m.add("EVENT_CANCEL", EVENT_CANCEL)?;
+    m.add("_EVENT_RESOLVE", EVENT_RESOLVE)?;
+    m.add("_MAX_RESOLVED", MAX_RESOLVED)?;
     m.add("STREAM_SENT", STREAM_SENT)?;
     m.add("STREAM_FULL", STREAM_FULL)?;
     m.add("STREAM_CLOSED", STREAM_CLOSED)?;
