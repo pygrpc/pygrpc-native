@@ -35,6 +35,8 @@ const GRPC_HEADER_LEN: u64 = 5;
 // Enough to flush GOAWAY. grpcio clients keep an idle connection open after
 // it, and like grpcio's stop(grace=None) we do not wait for them.
 pub const CONNECTION_DRAIN_TIMEOUT: Duration = Duration::from_millis(100);
+// How long a closing connection waits for its calls to finish sending.
+pub const CALL_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 // Fixed windows instead of BDP probing. A stream that is not read holds up
 // at most STREAM_WINDOW; the connection window is the protocol maximum so such
 // streams never stall the others sharing the connection, which grpc-core
@@ -1052,31 +1054,33 @@ pub(crate) async fn serve_connection<IO>(
         _ = stopped(&mut shutdown) => return,
     };
     let fallback = Arc::new(Fallback::default());
-    let active = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::new(Calls::default());
     let keepalive = keepalive(
         shared.connection.keepalive,
         connection.ping_pong(),
-        active.clone(),
+        calls.clone(),
         reads,
     );
     tokio::pin!(keepalive);
+    let spawn = |request, respond| {
+        let call = ActiveCall::new(calls.clone());
+        let stream = serve_stream(
+            shared.clone(),
+            peer.clone(),
+            fallback.clone(),
+            request,
+            respond,
+        );
+        tokio::spawn(async move {
+            let _call = call;
+            stream.await;
+        });
+    };
+    let mut stopping = false;
     loop {
         tokio::select! {
             accepted = connection.accept() => match accepted {
-                Some(Ok((request, respond))) => {
-                    let call = ActiveCall::new(active.clone());
-                    let stream = serve_stream(
-                        shared.clone(),
-                        peer.clone(),
-                        fallback.clone(),
-                        request,
-                        respond,
-                    );
-                    tokio::spawn(async move {
-                        let _call = call;
-                        stream.await;
-                    });
-                }
+                Some(Ok((request, respond))) => spawn(request, respond),
                 Some(Err(err)) => {
                     log::debug!("gRPC connection ended with error: {err}");
                     return;
@@ -1084,8 +1088,35 @@ pub(crate) async fn serve_connection<IO>(
                 None => return,
             },
             _ = &mut keepalive => break,
-            _ = stopped(&mut shutdown) => break,
+            _ = stopped(&mut shutdown) => {
+                stopping = true;
+                break;
+            }
         }
+    }
+    if stopping {
+        // abrupt_shutdown() drops what the calls haven't written yet.
+        let finished = calls.finished();
+        tokio::pin!(finished);
+        let _ = tokio::time::timeout(CALL_DRAIN_TIMEOUT, async {
+            loop {
+                tokio::select! {
+                    accepted = connection.accept() => match accepted {
+                        Some(Ok((request, respond))) => spawn(request, respond),
+                        _ => return,
+                    },
+                    _ = &mut finished => break,
+                }
+            }
+            poll_fn(|cx| {
+                while let Poll::Ready(Some(Ok((request, respond)))) = connection.poll_accept(cx) {
+                    spawn(request, respond);
+                }
+                Poll::Ready(())
+            })
+            .await;
+        })
+        .await;
     }
     // Unlike a graceful GOAWAY, which waits for a PING an idle grpcio client
     // does not answer, this names the last stream served, so the client
@@ -1099,19 +1130,43 @@ pub(crate) async fn serve_connection<IO>(
     .await;
 }
 
-/// Counts a connection's calls in flight, for keepalive.
-struct ActiveCall(Arc<AtomicUsize>);
+/// A connection's calls in flight, for keepalive and for closing.
+#[derive(Default)]
+struct Calls {
+    count: AtomicUsize,
+    closing: AtomicBool,
+    finished: Notify,
+}
+
+impl Calls {
+    async fn finished(&self) {
+        self.closing.store(true, Ordering::SeqCst);
+        loop {
+            let finished = self.finished.notified();
+            if self.count.load(Ordering::SeqCst) == 0 {
+                return;
+            }
+            finished.await;
+        }
+    }
+}
+
+struct ActiveCall(Arc<Calls>);
 
 impl ActiveCall {
-    fn new(active: Arc<AtomicUsize>) -> Self {
-        active.fetch_add(1, Ordering::Relaxed);
-        ActiveCall(active)
+    fn new(calls: Arc<Calls>) -> Self {
+        calls.count.fetch_add(1, Ordering::Relaxed);
+        ActiveCall(calls)
     }
 }
 
 impl Drop for ActiveCall {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Relaxed);
+        // SeqCst on both sides, so finished() can't miss the last call.
+        if self.0.count.fetch_sub(1, Ordering::SeqCst) == 1 && self.0.closing.load(Ordering::SeqCst)
+        {
+            self.0.finished.notify_waiters();
+        }
     }
 }
 
@@ -1198,7 +1253,7 @@ impl<IO: AsyncWrite + Unpin> AsyncWrite for Watched<IO> {
 async fn keepalive(
     config: Keepalive,
     ping_pong: Option<h2::PingPong>,
-    active: Arc<AtomicUsize>,
+    calls: Arc<Calls>,
     reads: Arc<LastRead>,
 ) {
     let (Some(time), Some(mut ping_pong)) = (config.time, ping_pong) else {
@@ -1214,7 +1269,7 @@ async fn keepalive(
             next = quiet_until;
             continue;
         }
-        if config.without_calls || active.load(Ordering::Relaxed) > 0 {
+        if config.without_calls || calls.count.load(Ordering::Relaxed) > 0 {
             let sent = reads.now();
             let pong = ping_pong.ping(h2::Ping::opaque());
             tokio::pin!(pong);
