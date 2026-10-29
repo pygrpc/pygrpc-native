@@ -30,9 +30,7 @@ use tonic::{Code, Status};
 
 use crate::metrics::{self, Metrics};
 
-// A stream queues messages until they add up to STREAM_BUDGET bytes, so small
-// messages don't each wait for the last one to go out. A larger message goes
-// alone.
+// Bytes a stream queues before the writer waits; a larger message goes alone.
 const STREAM_BUDGET: usize = 256 * 1024;
 const STREAM_QUEUE: usize = 64;
 // The compressed flag and length in front of every gRPC message.
@@ -162,7 +160,6 @@ enum StreamEnd {
     Status(Status),
 }
 
-/// Where a stream's messages go, holding room for them in the stream's budget.
 #[derive(Clone)]
 pub struct StreamSender {
     sender: mpsc::Sender<Bytes>,
