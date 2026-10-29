@@ -42,7 +42,7 @@ class _Seen(grpc.ServerInterceptor):
 
     def intercept_service(self, continuation: Callable, details: Any) -> Any:
         self.seen.append(details.method)
-        if details.method == "/l.S/InterceptorBoom":
+        if details.method.endswith("/InterceptorBoom"):
             raise ValueError("boom")
         return continuation(details)
 
@@ -53,7 +53,7 @@ class _AioSeen(aio.ServerInterceptor):
 
     async def intercept_service(self, continuation: Callable, details: Any) -> Any:
         self.seen.append(details.method)
-        if details.method == "/l.S/InterceptorBoom":
+        if details.method.endswith("/InterceptorBoom"):
             raise ValueError("boom")
         return await continuation(details)
 
@@ -144,7 +144,11 @@ def _add(server: Any, handlers: dict[str, grpc.RpcMethodHandler]) -> None:
     # Both, as generated code does: grpc.aio ignores registered handlers
     # before grpcio 1.84.
     server.add_generic_rpc_handlers(
-        (grpc.method_handlers_generic_handler("l.S", handlers),)
+        (
+            grpc.method_handlers_generic_handler("l.S", handlers),
+            # Only generic, so the fallback server serves all of g.S.
+            grpc.method_handlers_generic_handler("g.S", handlers),
+        )
     )
     server.add_registered_method_handlers("l.S", handlers)
 
@@ -310,36 +314,49 @@ def test_sync_rejects_without_waiting_for_a_worker(factory: Callable) -> None:
     assert elapsed < 1
 
 
-def _native_while_bidi_is_held(target: str, gate: _Gate, seen: list[str]) -> Any:
-    with grpc.insecure_channel(target) as channel:
-        first = _hold(channel, "bidi")
-        assert gate.entered.acquire(timeout=10)
-        out = _outcome(lambda: channel.unary_unary("/l.S/Fast")(b"x", timeout=5))
-        gate.open.set()
-        list(first)
-    return out
+def _one_kind_while_the_other_is_held(held: str) -> Client:
+    """Holds a call of kind `held` and sends one of the other kind, so that
+    one of them is served natively and the other by the fallback server."""
+
+    def client(target: str, gate: _Gate, seen: list[str]) -> Any:
+        with grpc.insecure_channel(target) as channel:
+            first = _hold(channel, held)
+            assert gate.entered.acquire(timeout=10)
+            if held == "bidi":
+                out = _outcome(
+                    lambda: channel.unary_unary("/l.S/Fast")(b"x", timeout=5)
+                )
+            else:
+                out = _outcome(
+                    lambda: channel.stream_stream("/l.S/Chat")(iter([b"x"]), timeout=5)
+                )
+            gate.open.set()
+            _outcome(lambda: first.result() if held == "unary" else list(first))
+        return out
+
+    return client
 
 
-@pytest.mark.parametrize(
-    "serve, factory",
-    [(_serve_sync, pygrpc_native.server), (_serve_aio, pygrpc_native.aio.server)],
-    ids=["sync", "aio"],
-)
-def test_native_and_fallback_methods_are_counted_apart(
-    serve: Callable, factory: Callable
+@pytest.mark.parametrize("held", ["unary", "bidi"])
+@SERVERS
+def test_native_and_fallback_methods_share_the_limit(
+    serve: Callable, native: Callable, reference: Callable, held: str
 ) -> None:
-    # grpcio counts both together and would reject this call.
-    assert serve(factory, _native_while_bidi_is_held, maximum_concurrent_rpcs=1) == b"x"
+    client = _one_kind_while_the_other_is_held(held)
+    got = serve(native, client, maximum_concurrent_rpcs=1)
+    assert got == serve(reference, client, maximum_concurrent_rpcs=1) == EXCEEDED
 
 
 def _failures_then_fast(target: str, gate: _Gate, seen: list[str]) -> Any:
     out = []
     with grpc.insecure_channel(target) as channel:
-        for _ in range(3):
+        for service in ("l.S", "g.S"):
             for method in ("Boom", "Abort", "InterceptorBoom", "BadRequest"):
                 out.append(
                     _outcome(
-                        lambda: channel.unary_unary(f"/l.S/{method}")(b"x", timeout=5)
+                        lambda: channel.unary_unary(f"/{service}/{method}")(
+                            b"x", timeout=5
+                        )
                     )[0]
                 )
                 out.append(
@@ -360,26 +377,35 @@ def test_failed_calls_give_their_place_back(serve: Callable, factory: Callable) 
     # so it sometimes rejects the call right after a failure.
     out = serve(factory, _failures_then_fast, maximum_concurrent_rpcs=1)
     assert grpc.StatusCode.OK not in out[0::2]
-    assert out[1::2] == [b"x"] * 12
+    assert out[1::2] == [b"x"] * 8
 
 
-def _deadline_then_fast(target: str, gate: _Gate, seen: list[str]) -> Any:
-    with grpc.insecure_channel(target) as channel:
-        expired = _outcome(lambda: channel.unary_unary("/l.S/Slow")(b"a", timeout=0.3))
-        gate.open.set()
-        fast = channel.unary_unary("/l.S/Fast")
-        return expired[0], _eventually(lambda: fast(b"x", timeout=5), b"x")
+def _deadline_then_fast(held: str) -> Client:
+    def client(target: str, gate: _Gate, seen: list[str]) -> Any:
+        with grpc.insecure_channel(target) as channel:
+            if held == "unary":
+                slow = channel.unary_unary("/l.S/Slow")
+                expired = _outcome(lambda: slow(b"a", timeout=0.3))
+            else:
+                chat = channel.stream_stream("/l.S/Chat")
+                expired = _outcome(lambda: list(chat(iter([b"a"]), timeout=0.3)))
+            gate.open.set()
+            fast = channel.unary_unary("/l.S/Fast")
+            return expired[0], _eventually(lambda: fast(b"x", timeout=5), b"x")
+
+    return client
 
 
+@pytest.mark.parametrize("held", ["unary", "bidi"])
 @pytest.mark.parametrize(
     "serve, factory",
     [(_serve_sync, pygrpc_native.server), (_serve_aio, pygrpc_native.aio.server)],
     ids=["sync", "aio"],
 )
 def test_call_past_its_deadline_gives_its_place_back(
-    serve: Callable, factory: Callable
+    serve: Callable, factory: Callable, held: str
 ) -> None:
-    got = serve(factory, _deadline_then_fast, maximum_concurrent_rpcs=1)
+    got = serve(factory, _deadline_then_fast(held), maximum_concurrent_rpcs=1)
     assert got == (grpc.StatusCode.DEADLINE_EXCEEDED, b"x")
 
 

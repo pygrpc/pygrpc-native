@@ -198,6 +198,79 @@ class _ConcurrencyLimit:
             self._active -= 1
 
 
+_LIMIT_EXCEEDED = "Concurrent RPC limit exceeded!"
+
+
+def _behavior(handler: grpc.RpcMethodHandler) -> Callable[..., Any]:
+    kind = (
+        f"{'stream' if handler.request_streaming else 'unary'}_"
+        f"{'stream' if handler.response_streaming else 'unary'}"
+    )
+    return getattr(handler, kind)
+
+
+def _with_behavior(
+    handler: grpc.RpcMethodHandler, behavior: Callable[..., Any]
+) -> grpc.RpcMethodHandler:
+    make = {
+        (False, False): grpc.unary_unary_rpc_method_handler,
+        (False, True): grpc.unary_stream_rpc_method_handler,
+        (True, False): grpc.stream_unary_rpc_method_handler,
+        (True, True): grpc.stream_stream_rpc_method_handler,
+    }[(handler.request_streaming, handler.response_streaming)]
+    return make(
+        behavior,
+        request_deserializer=handler.request_deserializer,
+        response_serializer=handler.response_serializer,
+    )
+
+
+def _counted(
+    limit: _ConcurrencyLimit, behavior: Callable[..., Any], streaming: bool
+) -> Callable[..., Any]:
+    """Wraps a synchronous behavior so that it holds a place in `limit` while
+    it runs. A call grpcio never hands to its behavior holds none."""
+    if streaming:
+
+        def counted_stream(request: Any, context: grpc.ServicerContext) -> Any:
+            if not limit.admit():
+                context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, _LIMIT_EXCEEDED)
+            try:
+                yield from behavior(request, context)
+            finally:
+                limit.release()
+
+        return counted_stream
+
+    def counted(request: Any, context: grpc.ServicerContext) -> Any:
+        if not limit.admit():
+            context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, _LIMIT_EXCEEDED)
+        try:
+            return behavior(request, context)
+        finally:
+            limit.release()
+
+    return counted
+
+
+class _FallbackLimit(grpc.ServerInterceptor):
+    """Counts the fallback server's calls against the front's limit."""
+
+    def __init__(self, limit: _ConcurrencyLimit) -> None:
+        self._limit = limit
+
+    def intercept_service(
+        self,
+        continuation: Callable[[grpc.HandlerCallDetails], grpc.RpcMethodHandler | None],
+        handler_call_details: grpc.HandlerCallDetails,
+    ) -> grpc.RpcMethodHandler | None:
+        handler = continuation(handler_call_details)
+        if handler is None:
+            return None
+        behavior = _counted(self._limit, _behavior(handler), handler.response_streaming)
+        return _with_behavior(handler, behavior)
+
+
 class _Call:
     def __init__(
         self,
@@ -495,11 +568,12 @@ class Server(_Codec, grpc.Server):
     ) -> None:
         assert self._front is not None
         self._fallback_dir, path = _fallback_socket()
+        interceptors = self._interceptors
+        if self._limit.maximum is not None:
+            # Last: grpcio applies its limit after the interceptors.
+            interceptors += (_FallbackLimit(self._limit),)
         fallback = grpc.server(
-            self._executor,
-            interceptors=self._interceptors,
-            options=self._options,
-            maximum_concurrent_rpcs=self._limit.maximum,
+            self._executor, interceptors=interceptors, options=self._options
         )
         fallback.add_generic_rpc_handlers(generic)
         for service, handlers in streamed.items():
@@ -638,7 +712,7 @@ class Server(_Codec, grpc.Server):
                 self._front.fail(  # type: ignore[union-attr]
                     call.call_id,
                     _code(grpc.StatusCode.RESOURCE_EXHAUSTED),
-                    "Concurrent RPC limit exceeded!",
+                    _LIMIT_EXCEEDED,
                 )
         finally:
             call.terminate()

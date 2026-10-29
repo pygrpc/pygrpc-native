@@ -21,16 +21,20 @@ from pygrpc_native._native import (
 )
 from pygrpc_native._server import (
     _AUTH_CONTEXT,
+    _LIMIT_EXCEEDED,
     _NO_DEADLINE,
     _Codec,
     _code,
+    _behavior,
     _ConcurrencyLimit,
+    _counted,
     _fallback_socket,
     _HandlerCallDetails,
     _Metadatum,
     _parse_options,
     _split_handlers,
     _use_handler,
+    _with_behavior,
 )
 
 __all__ = ["Server", "server"]
@@ -284,6 +288,57 @@ class _SyncContext:
         return getattr(self._context, name)
 
 
+class _FallbackLimit(aio.ServerInterceptor):
+    """Counts the fallback server's calls against the front's limit.
+
+    A call holds a place while its behavior runs. grpc.aio picks how to run a
+    behavior by its type, so the wrapper keeps that type.
+    """
+
+    def __init__(self, limit: _ConcurrencyLimit) -> None:
+        self._limit = limit
+
+    async def intercept_service(
+        self,
+        continuation: Callable[[grpc.HandlerCallDetails], Any],
+        handler_call_details: grpc.HandlerCallDetails,
+    ) -> grpc.RpcMethodHandler | None:
+        handler = await continuation(handler_call_details)
+        if handler is None:
+            return None
+        behavior, limit = _behavior(handler), self._limit
+        if inspect.isasyncgenfunction(behavior):
+
+            async def counted_stream(request: Any, context: Any) -> Any:
+                if not limit.admit():
+                    await context.abort(
+                        grpc.StatusCode.RESOURCE_EXHAUSTED, _LIMIT_EXCEEDED
+                    )
+                try:
+                    async for response in behavior(request, context):
+                        yield response
+                finally:
+                    limit.release()
+
+            return _with_behavior(handler, counted_stream)
+        if inspect.iscoroutinefunction(behavior):
+
+            async def counted(request: Any, context: Any) -> Any:
+                if not limit.admit():
+                    await context.abort(
+                        grpc.StatusCode.RESOURCE_EXHAUSTED, _LIMIT_EXCEEDED
+                    )
+                try:
+                    return await behavior(request, context)
+                finally:
+                    limit.release()
+
+            return _with_behavior(handler, counted)
+        return _with_behavior(
+            handler, _counted(limit, behavior, handler.response_streaming)
+        )
+
+
 class Server(_Codec, aio.Server):
     """A grpc.aio.Server whose HTTP/2 and gRPC work runs in Rust.
 
@@ -400,11 +455,12 @@ class Server(_Codec, aio.Server):
     ) -> None:
         assert self._front is not None
         self._fallback_dir, path = _fallback_socket()
+        interceptors = self._interceptors
+        if self._limit.maximum is not None:
+            # Last: grpcio applies its limit after the interceptors.
+            interceptors += (_FallbackLimit(self._limit),)
         fallback = aio.server(
-            self._executor,
-            interceptors=self._interceptors,
-            options=self._options,
-            maximum_concurrent_rpcs=self._limit.maximum,
+            self._executor, interceptors=interceptors, options=self._options
         )
         # grpc.aio ignores add_registered_method_handlers() before grpcio 1.84,
         # so these go in as generic handlers, ahead of the others.
@@ -499,7 +555,7 @@ class Server(_Codec, aio.Server):
                 self._front.fail(  # type: ignore[union-attr]
                     call.call_id,
                     _code(grpc.StatusCode.RESOURCE_EXHAUSTED),
-                    "Concurrent RPC limit exceeded!",
+                    _LIMIT_EXCEEDED,
                 )
                 return
             ok, request = self._request(call, payload)
