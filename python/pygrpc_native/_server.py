@@ -13,7 +13,13 @@ from typing import Any
 
 import grpc
 
-from pygrpc_native._native import EVENT_CALL, EVENT_CANCEL, NativeGrpcFront
+from pygrpc_native._native import (
+    EVENT_CALL,
+    EVENT_CANCEL,
+    _EVENT_RESOLVE,
+    _MAX_RESOLVED,
+    NativeGrpcFront,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -172,6 +178,61 @@ def _use_handler(
     return True
 
 
+class _Methods:
+    """The methods a server serves natively: `_table` holds
+    `(path, registered handler, server streaming)` by method id, with None for
+    a method only generic handlers know, which is looked up on every call."""
+
+    _front: NativeGrpcFront | None
+    _registered: dict[str, grpc.RpcMethodHandler]
+    _generic: list[grpc.GenericRpcHandler]
+    _table: list[tuple[str, grpc.RpcMethodHandler | None, bool]]
+    # Paths answered for good: their method id, or None for the fallback.
+    _resolved: dict[str, int | None]
+
+    def _lookup(self, details: grpc.HandlerCallDetails) -> grpc.RpcMethodHandler | None:
+        for generic in self._generic:
+            handler = generic.service(details)
+            if handler is not None:
+                return handler
+        return None
+
+    def _resolve(self, resolve_id: int, path: str, metadata: Any) -> None:
+        """Answers the front's first call to a method it doesn't know."""
+        assert self._front is not None
+        remember = True
+        if path in self._resolved:
+            method_id = self._resolved[path]
+        else:
+            method_id = None
+            # Registered client-streaming methods come first, as in grpcio.
+            if path not in self._registered:
+                details = _HandlerCallDetails(
+                    path, tuple(_Metadatum(key, value) for key, value in metadata)
+                )
+                try:
+                    handler = contextvars.Context().run(self._lookup, details)
+                except Exception:
+                    # The fallback server reports it.
+                    handler = None
+                if handler is None:
+                    remember = False
+                elif not handler.request_streaming:
+                    method_id = len(self._table)
+            if len(self._resolved) >= _MAX_RESOLVED:
+                method_id, remember = None, False
+            if remember:
+                self._resolved[path] = method_id
+                if method_id is not None:
+                    self._table.append((path, None, handler.response_streaming))
+        self._front._resolved(
+            resolve_id,
+            method_id,
+            method_id is not None and self._table[method_id][2],
+            remember,
+        )
+
+
 class _Abort(Exception):
     pass
 
@@ -276,7 +337,8 @@ class _Call:
         self,
         call_id: int,
         method: str,
-        handler: grpc.RpcMethodHandler,
+        handler: grpc.RpcMethodHandler | None,
+        streaming: bool,
         metadata: tuple[tuple[str, str | bytes], ...],
         peer: str,
         time_remaining: float | None,
@@ -286,7 +348,7 @@ class _Call:
         self.handler = handler
         # Whether the front serves the method as a stream; an interceptor
         # can swap the handler, but not this.
-        self.streaming = handler.response_streaming
+        self.streaming = streaming
         self.metadata = metadata
         self.peer = peer
         self.deadline = (
@@ -465,12 +527,11 @@ class _Codec:
         return data
 
 
-class Server(_Codec, grpc.Server):
+class Server(_Codec, _Methods, grpc.Server):
     """A grpc.Server whose HTTP/2 and gRPC work runs in Rust.
 
-    Serves unary and server-streaming methods added with
-    ``add_registered_method_handlers``, as generated code does, on one
-    insecure port. Other methods are served by a grpcio server behind it.
+    Serves unary and server-streaming methods on one insecure port. Other
+    methods are served by a grpcio server behind it.
     """
 
     def __init__(
@@ -498,7 +559,9 @@ class Server(_Codec, grpc.Server):
         self._front: NativeGrpcFront | None = None
         self._fallback: grpc.Server | None = None
         self._fallback_dir: str | None = None
-        self._table: list[tuple[str, grpc.RpcMethodHandler]] = []
+        self._generic: list[grpc.GenericRpcHandler] = []
+        self._table: list[tuple[str, grpc.RpcMethodHandler | None, bool]] = []
+        self._resolved: dict[str, int | None] = {}
         self._calls: dict[int, _Call] = {}
         self._lock = threading.Lock()
         self._started = False
@@ -550,11 +613,16 @@ class Server(_Codec, grpc.Server):
             # only the fallback server can run them for those.
             if streamed or generic or self._interceptors:
                 self._start_fallback(streamed, generic)
-            paths = list(native)
+            if generic:
+                self._generic = generic
+                self._front._resolve_unknown_methods()
+            self._table = [
+                (path, handler, handler.response_streaming)
+                for path, handler in native.items()
+            ]
             self._front.add_methods(
-                [(path, native[path].response_streaming) for path in paths]
+                [(path, streaming) for path, _, streaming in self._table]
             )
-            self._table = [(path, native[path]) for path in paths]
             self._front.start()
             self._started = True
         threading.Thread(
@@ -633,6 +701,9 @@ class Server(_Codec, grpc.Server):
                         if call is not None:
                             call.terminate()
                         continue
+                    if kind == _EVENT_RESOLVE:
+                        self._resolve(call_id, payload, details[0])
+                        continue
                     if self._stopping:
                         front.fail(
                             call_id,
@@ -645,8 +716,7 @@ class Server(_Codec, grpc.Server):
                         and payload is not None
                         and details is not None
                     )
-                    method, handler = self._table[method_id]
-                    call = _Call(call_id, method, handler, *details)
+                    call = _Call(call_id, *self._table[method_id], *details)
                     if self._limit.maximum is not None and not self._limit.admit():
                         # Not on a worker, so busy workers can't delay it.
                         call.admitted = False
@@ -668,7 +738,9 @@ class Server(_Codec, grpc.Server):
                     call = self._calls.pop(call_id, None)
                     if call is not None:
                         self._release(call)
-                    if kind == EVENT_CALL:
+                    if kind == _EVENT_RESOLVE:
+                        front._resolved(call_id, None, remember=False)
+                    elif kind == EVENT_CALL:
                         front.fail(
                             call_id,
                             _code(grpc.StatusCode.INTERNAL),
@@ -676,8 +748,9 @@ class Server(_Codec, grpc.Server):
                         )
 
     def _intercept(self, call: _Call) -> bool:
-        """Runs the interceptors, which may replace the call's handler."""
-        if not self._interceptors:
+        """Runs the interceptors, which may replace the call's handler, and
+        looks up the handler of a method only generic handlers know."""
+        if not self._interceptors and call.handler is not None:
             return True
         front = self._front
         assert front is not None
@@ -689,7 +762,7 @@ class Server(_Codec, grpc.Server):
 
         def intercept_at(index: int, details: grpc.HandlerCallDetails) -> Any:
             if index == len(self._interceptors):
-                return registered
+                return registered if registered is not None else self._lookup(details)
             return self._interceptors[index].intercept_service(
                 lambda details: intercept_at(index + 1, details), details
             )

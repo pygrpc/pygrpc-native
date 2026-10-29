@@ -146,7 +146,7 @@ def _add(server: Any, handlers: dict[str, grpc.RpcMethodHandler]) -> None:
     server.add_generic_rpc_handlers(
         (
             grpc.method_handlers_generic_handler("l.S", handlers),
-            # Only generic, so the fallback server serves all of g.S.
+            # Only generic: served natively but for Chat.
             grpc.method_handlers_generic_handler("g.S", handlers),
         )
     )
@@ -455,7 +455,7 @@ def test_aio_call_cancelled_in_the_same_batch_gives_its_place_back() -> None:
         server.add_insecure_port("127.0.0.1:0")
         await server.start()
         try:
-            method_id = [path for path, _ in server._table].index("/l.S/Fast")
+            method_id = [path for path, *_ in server._table].index("/l.S/Fast")
             details = ((), "ipv4:127.0.0.1:1", None)
             server._on_events(
                 [

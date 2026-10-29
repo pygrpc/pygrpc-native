@@ -15,6 +15,7 @@ from grpc import aio
 
 from pygrpc_native._native import (
     EVENT_CANCEL,
+    _EVENT_RESOLVE,
     STREAM_CLOSED,
     STREAM_FULL,
     NativeGrpcFront,
@@ -31,6 +32,7 @@ from pygrpc_native._server import (
     _fallback_socket,
     _HandlerCallDetails,
     _Metadatum,
+    _Methods,
     _parse_options,
     _split_handlers,
     _use_handler,
@@ -49,7 +51,8 @@ class _Call:
         self,
         call_id: int,
         method: str,
-        handler: grpc.RpcMethodHandler,
+        handler: grpc.RpcMethodHandler | None,
+        streaming: bool,
         metadata: tuple[tuple[str, str | bytes], ...],
         peer: str,
         time_remaining: float | None,
@@ -59,7 +62,7 @@ class _Call:
         self.handler = handler
         # Whether the front serves the method as a stream; an interceptor
         # can swap the handler, but not this.
-        self.streaming = handler.response_streaming
+        self.streaming = streaming
         self.metadata = metadata
         self.peer = peer
         self.deadline = (
@@ -339,7 +342,7 @@ class _FallbackLimit(aio.ServerInterceptor):
         )
 
 
-class Server(_Codec, aio.Server):
+class Server(_Codec, _Methods, aio.Server):
     """A grpc.aio.Server whose HTTP/2 and gRPC work runs in Rust.
 
     Handlers run on the event loop that calls ``start()``; handlers that
@@ -385,7 +388,9 @@ class Server(_Codec, aio.Server):
         self._front: NativeGrpcFront | None = None
         self._fallback: aio.Server | None = None
         self._fallback_dir: str | None = None
-        self._table: list[tuple[str, grpc.RpcMethodHandler]] = []
+        self._generic: list[grpc.GenericRpcHandler] = []
+        self._table: list[tuple[str, grpc.RpcMethodHandler | None, bool]] = []
+        self._resolved: dict[str, int | None] = {}
         self._calls: dict[int, _Call] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
         self._started = False
@@ -438,11 +443,16 @@ class Server(_Codec, aio.Server):
         # only the fallback server can run them for those.
         if streamed or generic or self._interceptors:
             await self._start_fallback(streamed, generic)
-        paths = list(native)
+        if generic:
+            self._generic = generic
+            self._front._resolve_unknown_methods()
+        self._table = [
+            (path, handler, handler.response_streaming)
+            for path, handler in native.items()
+        ]
         self._front.add_methods(
-            [(path, native[path].response_streaming) for path in paths]
+            [(path, streaming) for path, _, streaming in self._table]
         )
-        self._table = [(path, native[path]) for path in paths]
         self._front.start()
         threading.Thread(
             target=self._dispatch, name="pygrpc-native-dispatch", daemon=True
@@ -525,6 +535,13 @@ class Server(_Codec, aio.Server):
                 if call is not None:
                     call.cancel()
                 continue
+            if kind == _EVENT_RESOLVE:
+                try:
+                    self._resolve(call_id, payload, details[0])
+                except Exception:
+                    _LOGGER.exception("Error resolving %s", payload)
+                    front._resolved(call_id, None, remember=False)
+                continue
             if self._stopping:
                 front.fail(
                     call_id,
@@ -532,8 +549,7 @@ class Server(_Codec, aio.Server):
                     "Server is shutting down",
                 )
                 continue
-            method, handler = self._table[method_id]
-            call = _Call(call_id, method, handler, *details)
+            call = _Call(call_id, *self._table[method_id], *details)
             limited = self._limit.maximum is not None
             if limited:
                 call.admitted = self._limit.admit()
@@ -549,7 +565,9 @@ class Server(_Codec, aio.Server):
     async def _run(self, call: _Call, payload: bytes) -> None:
         context = _Context(self, call)
         try:
-            if self._interceptors and not await self._intercept(call):
+            if (
+                self._interceptors or call.handler is None
+            ) and not await self._intercept(call):
                 return
             if not call.admitted:
                 self._front.fail(  # type: ignore[union-attr]
@@ -576,7 +594,8 @@ class Server(_Codec, aio.Server):
             call.finish(context)
 
     async def _intercept(self, call: _Call) -> bool:
-        """Runs the interceptors, which may replace the call's handler."""
+        """Runs the interceptors, which may replace the call's handler, and
+        looks up the handler of a method only generic handlers know."""
         front = self._front
         assert front is not None
         registered = call.handler
@@ -587,7 +606,7 @@ class Server(_Codec, aio.Server):
 
         async def intercept_at(index: int, details: grpc.HandlerCallDetails) -> Any:
             if index == len(self._interceptors):
-                return registered
+                return registered if registered is not None else self._lookup(details)
             return await self._interceptors[index].intercept_service(
                 lambda details: intercept_at(index + 1, details), details
             )
