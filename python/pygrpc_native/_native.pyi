@@ -8,18 +8,21 @@ EVENT_CALL: int
 EVENT_CANCEL: int
 _EVENT_RESOLVE: int
 _MAX_RESOLVED: int
+_EVENT_WRITABLE: int
+_STREAM_PARKED: int
 STREAM_SENT: int
 STREAM_FULL: int
 STREAM_CLOSED: int
 
 # (kind, call_id, method_id, payload, client_key); payload and client_key are
-# None for EVENT_CANCEL, and payload is the method path for _EVENT_RESOLVE.
-Event = tuple[int, int, int, bytes | str | None, bytes | str | None]
+# None for EVENT_CANCEL. payload is the method path for _EVENT_RESOLVE, and
+# whether the held message went out for _EVENT_WRITABLE.
+Event = tuple[int, int, int, bytes | str | bool | None, bytes | str | None]
 
 # (metadata, peer, time_remaining); metadata values are bytes for -bin keys.
 CallDetails = tuple[tuple[tuple[str, str | bytes], ...], str, float | None]
 DetailedEvent = tuple[
-    int, int, int, bytes | str | None, bytes | str | None, CallDetails | None
+    int, int, int, bytes | str | bool | None, bytes | str | None, CallDetails | None
 ]
 
 class NativeGrpcFront:
@@ -76,6 +79,7 @@ class NativeGrpcFront:
     ) -> bool: ...
     def stream_send(self, call_id: int, payload: bytes) -> bool: ...
     def stream_try_send(self, call_id: int, payload: bytes) -> int: ...
+    def _stream_send_or_park(self, call_id: int, payload: bytes) -> int: ...
     def stream_send_initial_metadata(
         self, call_id: int, metadata: Metadata
     ) -> bool: ...

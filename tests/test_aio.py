@@ -588,6 +588,36 @@ def test_slow_reader_gets_every_message(pb: tuple[Any, Any]) -> None:
     assert asyncio.run(run()) == [str(i) for i in range(16)]
 
 
+def test_client_leaving_a_blocked_stream_cancels_the_handler(
+    pb: tuple[Any, Any], kind: str
+) -> None:
+    a_pb2, a_pb2_grpc = pb
+    chunk = "x" * (1 << 20)
+    ended = asyncio.Event()
+
+    async def endless(request: Any, context: aio.ServicerContext) -> AsyncIterator[Any]:
+        try:
+            while True:
+                yield a_pb2.Msg(s=chunk)
+        finally:
+            ended.set()
+
+    async def run() -> None:
+        server, port = await _serve(pb, kind, stream=endless)
+        try:
+            async with aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+                call = a_pb2_grpc.SStub(channel).Stream(a_pb2.Msg(), timeout=10)
+                await call.read()
+                # Let the unread writes back up.
+                await asyncio.sleep(0.3)
+                call.cancel()
+            await asyncio.wait_for(ended.wait(), 5)
+        finally:
+            await server.stop(None)
+
+    asyncio.run(run())
+
+
 def test_sync_handlers_get_grpcio_sync_context() -> None:
     """Handlers that aren't coroutines get grpcio's sync context: abort()
     returns, and the call ends with its status once the handler does."""

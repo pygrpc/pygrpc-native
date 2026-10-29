@@ -106,6 +106,11 @@ pub enum Event {
     Cancel {
         call_id: u64,
     },
+    /// A message held by `_stream_send_or_park` went out, or its stream ended.
+    Writable {
+        call_id: u64,
+        sent: bool,
+    },
     /// A call to a method not in the table; see `resolve_unknown_methods`.
     Resolve {
         resolve_id: u64,
@@ -410,6 +415,10 @@ impl Shared {
 
     pub fn is_unary(&self, call_id: u64) -> bool {
         self.unary.lock().unwrap().contains_key(&call_id)
+    }
+
+    pub fn writable(&self, call_id: u64, sent: bool) {
+        let _ = self.events.send(Event::Writable { call_id, sent });
     }
 
     pub fn close(&self) {
