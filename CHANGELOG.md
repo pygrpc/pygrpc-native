@@ -4,6 +4,14 @@ All notable changes are listed here. The project follows
 [semantic versioning](https://semver.org); see
 [Compatibility](README.md#compatibility) for what that covers.
 
+## 0.7.0 (2026-10-30)
+
+### Added
+
+- `NativeGrpcFront(ordered=True)` hands a connection's calls to Python in the
+  order the client started them. Without it, calls sent back to back on one
+  connection can arrive out of order. (#89)
+
 ## 0.6.1 (2026-10-29)
 
 ### Changed
