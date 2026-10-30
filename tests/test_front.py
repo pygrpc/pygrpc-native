@@ -1,6 +1,10 @@
 """Tests for the pygrpc_native binding."""
 
+from collections.abc import Iterator
+from concurrent import futures
 from typing import cast
+import shutil
+import tempfile
 import threading
 import time
 
@@ -99,3 +103,104 @@ def test_invalid_arguments_are_rejected() -> None:
             front.recv_batch(0, 0)
     finally:
         front.close()
+
+
+def _ordered_front(**kwargs: object) -> tuple[NativeGrpcFront, list[bytes]]:
+    front = NativeGrpcFront("127.0.0.1:0", [("/t.S/U", False)], ordered=True, **kwargs)
+    front.start()
+    seen: list[bytes] = []
+
+    def serve() -> None:
+        while (events := front.recv_batch(64)) is not None:
+            for _, call_id, _, payload, _ in events:
+                seen.append(payload)
+                front.respond(call_id, b"")
+
+    threading.Thread(target=serve, daemon=True).start()
+    return front, seen
+
+
+def test_ordered_keeps_a_connections_calls_in_order() -> None:
+    front, seen = _ordered_front(io_threads=4)
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{front.bound_port}") as channel:
+            call = channel.unary_unary("/t.S/U")
+            # Calls queued before the channel connects go out in any order.
+            call(b"", timeout=5)
+            for _ in range(10):
+                seen.clear()
+                sent = [str(i).encode() for i in range(200)]
+                for future in [call.future(p, timeout=10) for p in sent]:
+                    future.result()
+                assert seen == sent
+    finally:
+        front.close()
+
+
+def test_ordered_call_waits_only_while_the_one_before_is_pending() -> None:
+    front, seen = _ordered_front()
+    stalled = threading.Event()
+
+    def unfinished() -> Iterator[bytes]:
+        yield b"a"
+        stalled.wait(10)
+
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{front.bound_port}") as channel:
+            channel.unary_unary("/t.S/U")(b"", timeout=5)
+            # A request whose body never ends holds up the call after it,
+            # until the client gives up on it.
+            first = channel.stream_unary("/t.S/U").future(unfinished(), timeout=10)
+            second = channel.unary_unary("/t.S/U").future(b"b", timeout=10)
+            time.sleep(0.3)
+            assert not second.done()
+            first.cancel()
+            assert second.result(timeout=5) == b""
+            stalled.set()
+    finally:
+        front.close()
+
+
+def test_ordered_calls_do_not_wait_on_an_open_forwarded_call() -> None:
+    def chat(
+        requests: Iterator[bytes], context: grpc.ServicerContext
+    ) -> Iterator[bytes]:
+        yield from requests
+
+    fallback = grpc.server(futures.ThreadPoolExecutor(2))
+    fallback.add_generic_rpc_handlers(
+        [
+            grpc.method_handlers_generic_handler(
+                "t.F", {"Chat": grpc.stream_stream_rpc_method_handler(chat)}
+            )
+        ]
+    )
+    directory = tempfile.mkdtemp()
+    socket = f"{directory}/fallback.sock"
+    fallback.add_insecure_port(f"unix:{socket}")
+    fallback.start()
+    front = NativeGrpcFront("127.0.0.1:0", [("/t.S/U", False)], ordered=True)
+    front.set_fallback(socket)
+    front.start()
+    done = threading.Event()
+
+    def serve() -> None:
+        while (events := front.recv_batch(64)) is not None:
+            for _, call_id, _, _, _ in events:
+                front.respond(call_id, b"u")
+
+    def held() -> Iterator[bytes]:
+        yield b"a"
+        done.wait(10)
+
+    threading.Thread(target=serve, daemon=True).start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{front.bound_port}") as channel:
+            stream = channel.stream_stream("/t.F/Chat")(held(), timeout=10)
+            assert next(stream) == b"a"
+            assert channel.unary_unary("/t.S/U")(b"x", timeout=5) == b"u"
+            done.set()
+    finally:
+        front.close()
+        fallback.stop(None)
+        shutil.rmtree(directory, ignore_errors=True)

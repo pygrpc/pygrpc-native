@@ -96,6 +96,9 @@ struct Running {
 ///     reuse_port: Set SO_REUSEPORT on TCP listeners, so several processes
 ///         can serve one port. On Linux the kernel spreads connections
 ///         across them. Ignored for Unix sockets.
+///     ordered: Hand a connection's calls to Python in the order the client
+///         started them. Each call waits until the ones before it have
+///         arrived in full or ended.
 ///
 /// Raises:
 ///     OSError: If the address cannot be bound.
@@ -131,6 +134,7 @@ impl NativeGrpcFront {
         max_concurrent_streams=1024,
         max_metadata_size=16384,
         reuse_port=false,
+        ordered=false,
     ))]
     // Python keyword arguments.
     #[allow(clippy::too_many_arguments)]
@@ -150,6 +154,7 @@ impl NativeGrpcFront {
         max_concurrent_streams: u32,
         max_metadata_size: u32,
         reuse_port: bool,
+        ordered: bool,
     ) -> PyResult<Self> {
         if io_threads == 0 {
             return Err(PyValueError::new_err("io_threads must be greater than 0"));
@@ -229,6 +234,7 @@ impl NativeGrpcFront {
                     max_metadata_size,
                 },
                 metrics.then_some(io_threads),
+                ordered,
             )),
             events,
             handle: runtime.handle().clone(),
