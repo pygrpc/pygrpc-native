@@ -226,6 +226,9 @@ has all the numbers and explains how they were measured.
 - A method that only generic handlers know is looked up when it is first
   called, so their `service()` runs once more for that call. A method none of
   them knows is looked up on each call before it goes to the fallback server.
+- Calls sent back to back on one connection can reach handlers out of order.
+  gRPC doesn't guarantee an order across calls, though grpcio usually keeps
+  it. `NativeGrpcFront(ordered=True)` keeps it.
 - A call whose request metadata is over the limit (16 KiB unless set) is
   refused. Between `grpc.max_metadata_size` and that limit, grpcio also
   refuses some calls at random. This server doesn't.

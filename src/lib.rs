@@ -98,7 +98,7 @@ struct Running {
 ///         across them. Ignored for Unix sockets.
 ///     ordered: Hand a connection's calls to Python in the order the client
 ///         started them. Each call waits until the ones before it have
-///         arrived in full.
+///         arrived in full or ended.
 ///
 /// Raises:
 ///     OSError: If the address cannot be bound.
