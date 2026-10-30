@@ -43,6 +43,7 @@ class NativeGrpcFront:
         max_concurrent_streams: int = 1024,
         max_metadata_size: int = 16384,
         reuse_port: bool = False,
+        ordered: bool = False,
     ) -> None: ...
     @property
     def bound_port(self) -> int: ...

@@ -5,7 +5,7 @@
 //! Python as `(call_id, method_id, payload, client_key)` events. Python answers
 //! each call by id. Nothing in this file touches Python objects.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::{poll_fn, Future};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -287,6 +287,7 @@ pub struct Shared {
     connection: ConnectionSettings,
     // Shard count when metrics are on; the metrics are built at start().
     metrics_shards: Option<usize>,
+    ordered: bool,
     metrics: OnceLock<Metrics>,
     metrics_since: u64,
 }
@@ -302,6 +303,7 @@ impl Shared {
         bearer_auth: Option<BearerAuth>,
         connection: ConnectionSettings,
         metrics_shards: Option<usize>,
+        ordered: bool,
     ) -> Self {
         Shared {
             pending_methods: Mutex::new(methods),
@@ -323,6 +325,7 @@ impl Shared {
             bearer_auth,
             connection,
             metrics_shards,
+            ordered,
             metrics: OnceLock::new(),
             metrics_since: metrics::unix_nanos(),
         }
@@ -752,7 +755,11 @@ impl UnaryService<Bytes> for UnaryCall {
             &self.peer,
         );
         let details = call_details(&shared, request.metadata(), &self.peer, self.deadline);
+        let turn = turn(&shared, &request);
         Box::pin(async move {
+            if let Some(turn) = &turn {
+                turn.wait().await;
+            }
             let call_id = shared.next_call_id();
             let (sender, receiver) = oneshot::channel();
             shared.unary.lock().unwrap().insert(call_id, sender);
@@ -773,6 +780,7 @@ impl UnaryService<Bytes> for UnaryCall {
             if shared.events.send(event).is_err() {
                 return Err(shutting_down());
             }
+            drop(turn);
             match receiver.await {
                 Ok(reply) => reply.map(|answer| {
                     let mut response = tonic::Response::new(answer.payload);
@@ -882,7 +890,11 @@ impl ServerStreamingService<Bytes> for StreamingCall {
         let deadline = self
             .deadline
             .map(|deadline| Box::pin(tokio::time::sleep_until(deadline)));
+        let turn = turn(&shared, &request);
         Box::pin(async move {
+            if let Some(turn) = &turn {
+                turn.wait().await;
+            }
             let call_id = shared.next_call_id();
             let (sender, receiver) = mpsc::channel(STREAM_QUEUE);
             let room = Arc::new(Semaphore::new(STREAM_BUDGET));
@@ -924,6 +936,7 @@ impl ServerStreamingService<Bytes> for StreamingCall {
             if shared.events.send(event).is_err() {
                 return Err(shutting_down());
             }
+            drop(turn);
             let Some(started) = started else {
                 return Ok(tonic::Response::new(stream));
             };
@@ -952,7 +965,7 @@ async fn route(
     shared: Arc<Shared>,
     peer: Arc<str>,
     fallback: Arc<Fallback>,
-    request: http::Request<RequestBody>,
+    mut request: http::Request<RequestBody>,
     call: Option<&CallMetrics>,
 ) -> http::Response<tonic::body::Body> {
     let lookup = |request: &http::Request<RequestBody>| {
@@ -997,7 +1010,11 @@ async fn route(
     let Some((method_id, streaming)) = method else {
         return match shared.fallback.get() {
             // The fallback server counts these calls itself.
-            Some(path) => fallback.forward(path, request).await,
+            Some(path) => {
+                // A forwarded call can stay open; it must not hold up the next ones.
+                request.extensions_mut().remove::<Turn>();
+                fallback.forward(path, request).await
+            }
             None => {
                 if let Some(call) = call {
                     call.start(None);
@@ -1126,6 +1143,7 @@ pub(crate) async fn serve_connection<IO>(
     };
     let fallback = Arc::new(Fallback::default());
     let calls = Arc::new(Calls::default());
+    let order = shared.ordered.then(|| Arc::new(Sequencer::default()));
     let keepalive = keepalive(
         shared.connection.keepalive,
         connection.ping_pong(),
@@ -1141,6 +1159,7 @@ pub(crate) async fn serve_connection<IO>(
             fallback.clone(),
             request,
             respond,
+            order.as_ref().map(Sequencer::issue),
         );
         tokio::spawn(async move {
             let _call = call;
@@ -1220,6 +1239,83 @@ impl Calls {
             finished.await;
         }
     }
+}
+
+/// Hands a connection's calls to Python in the order the client started them.
+#[derive(Default)]
+struct Sequencer {
+    state: Mutex<SequencerState>,
+}
+
+#[derive(Default)]
+struct SequencerState {
+    issued: u64,
+    next: u64,
+    // Turns that ended before the ones ahead of them.
+    ended: HashSet<u64>,
+    waiting: HashMap<u64, oneshot::Sender<()>>,
+}
+
+impl Sequencer {
+    fn issue(self: &Arc<Self>) -> Turn {
+        let mut state = self.state.lock().unwrap();
+        let number = state.issued;
+        state.issued += 1;
+        Turn(Arc::new(TurnInner {
+            sequencer: self.clone(),
+            number,
+        }))
+    }
+}
+
+/// A call's place in its connection's order, given up when the last clone drops.
+#[derive(Clone)]
+struct Turn(Arc<TurnInner>);
+
+struct TurnInner {
+    sequencer: Arc<Sequencer>,
+    number: u64,
+}
+
+impl Turn {
+    async fn wait(&self) {
+        let ready = {
+            let mut state = self.0.sequencer.state.lock().unwrap();
+            if state.next == self.0.number {
+                return;
+            }
+            let (sender, ready) = oneshot::channel();
+            state.waiting.insert(self.0.number, sender);
+            ready
+        };
+        let _ = ready.await;
+    }
+}
+
+impl Drop for TurnInner {
+    fn drop(&mut self) {
+        let mut state = self.sequencer.state.lock().unwrap();
+        state.waiting.remove(&self.number);
+        if state.next != self.number {
+            state.ended.insert(self.number);
+            return;
+        }
+        let mut next = self.number + 1;
+        while state.ended.remove(&next) {
+            next += 1;
+        }
+        state.next = next;
+        if let Some(sender) = state.waiting.remove(&next) {
+            let _ = sender.send(());
+        }
+    }
+}
+
+fn turn<T>(shared: &Shared, request: &tonic::Request<T>) -> Option<Turn> {
+    if !shared.ordered {
+        return None;
+    }
+    request.extensions().get::<Turn>().cloned()
 }
 
 struct ActiveCall(Arc<Calls>);
@@ -1367,9 +1463,13 @@ async fn serve_stream(
     shared: Arc<Shared>,
     peer: Arc<str>,
     fallback: Arc<Fallback>,
-    request: http::Request<h2::RecvStream>,
+    mut request: http::Request<h2::RecvStream>,
     mut respond: h2::server::SendResponse<Bytes>,
+    turn: Option<Turn>,
 ) {
+    if let Some(turn) = turn {
+        request.extensions_mut().insert(turn);
+    }
     // Dropped without finish() (client reset, shutdown), it records CANCELLED.
     let call = shared
         .metrics_enabled()
