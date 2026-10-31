@@ -1,0 +1,12 @@
+# Cases that pass on grpcio but not on pygrpc-native. `modes` and `clients`
+# default to all of them.
+
+[[diff]]
+case = "status_code_and_message"
+issue = 92
+reason = "set_code() with a plain int hangs the call instead of sending UNKNOWN"
+
+[[diff]]
+case = "special_status_message"
+issue = 92
+reason = "set_code() with a plain int hangs the call instead of sending UNKNOWN"
