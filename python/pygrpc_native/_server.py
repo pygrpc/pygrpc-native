@@ -63,7 +63,10 @@ _FRONT_DEFAULTS = {"keepalive_permit_without_calls": False}
 
 
 def _code(code: grpc.StatusCode) -> int:
-    return code.value[0]
+    # Like grpcio, send UNKNOWN for anything that isn't a StatusCode.
+    if isinstance(code, grpc.StatusCode):
+        return code.value[0]
+    return grpc.StatusCode.UNKNOWN.value[0]
 
 
 def _limit(value: int) -> int | None:
