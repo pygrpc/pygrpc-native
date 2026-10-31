@@ -4,6 +4,14 @@ All notable changes are listed here. The project follows
 [semantic versioning](https://semver.org); see
 [Compatibility](README.md#compatibility) for what that covers.
 
+## Unreleased
+
+### Fixed
+
+- A handler that passed a plain int to `set_code()` or `abort()` left the call
+  hanging until the client's deadline. The sync server now sends `UNKNOWN` for
+  it and the aio server sends the int's status code, as grpcio's servers do.
+
 ## 0.7.0 (2026-10-30)
 
 ### Added
