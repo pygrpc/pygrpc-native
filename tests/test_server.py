@@ -201,6 +201,11 @@ UNARY_CASES: dict[str, Behavior] = {
         _set_code(context, grpc.StatusCode.ABORTED, "a"),
         1 / 0,
     ),
+    "set_code_int": lambda request, context: (
+        _set_code(context, 5, "nf"),  # type: ignore[arg-type]
+        request,
+    )[1],
+    "abort_int": lambda request, context: context.abort(5, "nf"),  # type: ignore[arg-type]
     "return_none": lambda request, context: None,
     "cancel": lambda request, context: (context.cancel(), request)[1],
 }
@@ -238,6 +243,10 @@ STREAM_CASES: dict[str, Behavior] = {
     "empty": lambda request, context: iter([]),
     "raise": _stream_raise,
     "set_code": _stream_set_code,
+    "set_code_int": lambda request, context: (
+        _set_code(context, 5, "nf"),  # type: ignore[arg-type]
+        iter([request]),
+    )[1],
     "metadata": _stream_metadata,
     "abort_first": _stream_abort_first,
 }

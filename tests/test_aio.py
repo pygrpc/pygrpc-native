@@ -194,6 +194,19 @@ async def _set_code_then_raise(request: Any, context: aio.ServicerContext) -> An
     return 1 / 0
 
 
+def _set_code_int(code: int) -> Behavior:
+    async def behavior(request: Any, context: aio.ServicerContext) -> Any:
+        context.set_code(code)  # type: ignore[arg-type]
+        context.set_details("nf")
+        return request
+
+    return behavior
+
+
+async def _abort_int(request: Any, context: aio.ServicerContext) -> Any:
+    await context.abort(5, "nf")  # type: ignore[arg-type]
+
+
 async def _echo(request: Any, context: aio.ServicerContext) -> Any:
     return request
 
@@ -212,6 +225,10 @@ UNARY_CASES: dict[str, Behavior] = {
     "catch_abort": _catch_abort,
     "set_code": _set_code,
     "set_code_then_raise": _set_code_then_raise,
+    "set_code_int": _set_code_int(5),
+    "set_code_int_zero": _set_code_int(0),
+    "set_code_int_out_of_range": _set_code_int(16),
+    "abort_int": _abort_int,
     "none": _none,
 }
 
@@ -244,6 +261,14 @@ async def _stream_set_code(
 ) -> AsyncIterator[Any]:
     yield request
     context.set_code(grpc.StatusCode.DATA_LOSS)
+    context.set_details("dl")
+
+
+async def _stream_set_code_int(
+    request: Any, context: aio.ServicerContext
+) -> AsyncIterator[Any]:
+    yield request
+    context.set_code(15)  # type: ignore[arg-type]
     context.set_details("dl")
 
 
@@ -282,6 +307,7 @@ STREAM_CASES: dict[str, Behavior] = {
     "empty": _empty,
     "raise": _stream_raise,
     "set_code": _stream_set_code,
+    "set_code_int": _stream_set_code_int,
     "abort_first": _stream_abort_first,
     "metadata": _stream_metadata,
     "headers_first": _headers_only,

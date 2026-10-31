@@ -46,6 +46,15 @@ _LOGGER = logging.getLogger(__name__)
 
 _END = object()
 
+# grpcio's aio server sends an int from 0 to 15 as that status code.
+_INT_CODES = {c.value[0]: c for c in grpc.StatusCode if c.value[0] < 16}
+
+
+def _status_code(code: grpc.StatusCode) -> grpc.StatusCode:
+    if isinstance(code, int):
+        return _INT_CODES.get(code, code)
+    return code
+
 
 class _Call:
     def __init__(
@@ -135,6 +144,7 @@ class _Context(aio.ServicerContext):
         details: str = "",
         trailing_metadata: Sequence[tuple[str, str | bytes]] = (),
     ) -> NoReturn:
+        code = _status_code(code)
         if code == grpc.StatusCode.OK:
             _LOGGER.error("abort() called with StatusCode.OK; returning UNKNOWN")
             code, details = grpc.StatusCode.UNKNOWN, ""
@@ -159,7 +169,7 @@ class _Context(aio.ServicerContext):
         return tuple(_Metadatum(key, value) for key, value in self._call.metadata)
 
     def set_code(self, code: grpc.StatusCode) -> None:
-        self._code = code
+        self._code = _status_code(code)
 
     def code(self) -> grpc.StatusCode | None:
         return self._code
