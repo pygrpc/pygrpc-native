@@ -4,7 +4,7 @@ All notable changes are listed here. The project follows
 [semantic versioning](https://semver.org); see
 [Compatibility](README.md#compatibility) for what that covers.
 
-## Unreleased
+## 0.7.1 (2026-10-31)
 
 ### Fixed
 

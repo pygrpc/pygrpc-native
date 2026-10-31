@@ -2,7 +2,7 @@
 
 [package]
 name = "pygrpc_native"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 license = "Apache-2.0"
 description = "A gRPC server in Rust that hands calls to Python handlers in batches"
