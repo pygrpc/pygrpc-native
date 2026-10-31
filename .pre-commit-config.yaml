@@ -10,9 +10,9 @@ repos:
   rev: v2.4.1
   hooks:
   - id: codespell
-    exclude: ^Cargo\.lock$
-    # "te" is an HTTP/2 header name.
-    args: [--ignore-words-list, te]
+    exclude: ^(Cargo\.lock|interop/protos/.*)$
+    # "te" is an HTTP/2 header name; COMPRESSABLE is a name in the interop protos.
+    args: [--ignore-words-list, "te,compressable"]
 - repo: local
   hooks:
   - id: rust-fmt
