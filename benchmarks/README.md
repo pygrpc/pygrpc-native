@@ -39,3 +39,5 @@ The clients are grpcio in every row, so at 1x1 they cost about the same
 whichever server they call. With pygrpc-native at 4x4 and 8x4 the clients make
 several times more calls on the same cores, which is why their CPU per call
 goes up.
+To test server-streaming throughput (messages/s) instead of unary calls, set `METHOD=stream`:
+`METHOD=stream python benchmarks/echo.py native-aio 8 4`

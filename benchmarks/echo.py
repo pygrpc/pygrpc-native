@@ -21,43 +21,54 @@ import grpc
 
 PAYLOAD = os.urandom(int(os.environ.get("SIZE", "64")))
 DUR = float(os.environ.get("DUR", "5"))
-METHOD = "/bench.Echo/Unary"
 
+METHOD_TYPE = os.environ.get("METHOD", "unary").lower()
+STREAM_COUNT = int(os.environ.get("STREAM_COUNT", "10"))
+METHOD_NAME = "Stream" if METHOD_TYPE in ("stream", "server_streaming") else "Unary"
+METHOD = f"/bench.Echo/{METHOD_NAME}"
 
 def ident(b: bytes) -> bytes:
     return b
 
-
 def serve(kind: str, port: int) -> None:
     target = f"127.0.0.1:{port}"
+
     if kind == "native":
         from pygrpc_native import EVENT_CALL, NativeGrpcFront
 
-        # Only when asked, so the script still runs against older releases.
         extra = {"metrics": True} if os.environ.get("METRICS") == "1" else {}
         front = NativeGrpcFront(target, [(METHOD, False)], **extra)
         front.start()
+
         while (events := front.recv_batch(256)) is not None:
             for ev_kind, call_id, _, payload, _ in events:
                 if ev_kind == EVENT_CALL:
                     front.respond(call_id, payload)
         return
+
     if kind in ("aio", "native-aio"):
         import asyncio
 
         async def main() -> None:
             async def unary(req: bytes, ctx: object) -> bytes:
                 return req
+            
+            async def server_stream(req: bytes, ctx: object):
+                for _ in range(STREAM_COUNT):
+                    yield req
 
             if kind == "aio":
                 server = grpc.aio.server()
             else:
                 import pygrpc_native.aio
-
                 server = pygrpc_native.aio.server()
+
             server.add_registered_method_handlers(
                 "bench.Echo",
-                {"Unary": grpc.unary_unary_rpc_method_handler(unary, ident, ident)},
+                {
+                    "Unary": grpc.unary_unary_rpc_method_handler(unary, ident, ident),
+                    "Stream": grpc.unary_stream_rpc_method_handler(server_stream, ident, ident)
+                },
             )
             server.add_insecure_port(target)
             await server.start()
@@ -65,65 +76,93 @@ def serve(kind: str, port: int) -> None:
 
         asyncio.run(main())
         return
+
     from concurrent.futures import ThreadPoolExecutor
 
     def unary(req: bytes, ctx: object) -> bytes:
         return req
 
+    def server_stream(req: bytes, ctx: object):
+        for _ in range(STREAM_COUNT):
+            yield req
+
     if kind == "sync":
         server = grpc.server(ThreadPoolExecutor(64))
     else:
         import pygrpc_native
-
         server = pygrpc_native.server(ThreadPoolExecutor(64))
+
     server.add_registered_method_handlers(
         "bench.Echo",
-        {"Unary": grpc.unary_unary_rpc_method_handler(unary, ident, ident)},
+        {
+            "Unary": grpc.unary_unary_rpc_method_handler(unary, ident, ident),
+            "Stream": grpc.unary_stream_rpc_method_handler(server_stream, ident, ident)
+        },
     )
     server.add_insecure_port(target)
     server.start()
     server.wait_for_termination()
 
-
 def client(port: int, threads: int, out: mp.Queue, ready: mp.Queue) -> None:
     channel = grpc.insecure_channel(f"127.0.0.1:{port}")
     grpc.channel_ready_future(channel).result(30)
-    call = channel.unary_unary(METHOD, ident, ident)
+    
+    if METHOD_NAME == "Stream":
+        call = channel.unary_stream(METHOD, ident, ident)
+    else:
+        call = channel.unary_unary(METHOD, ident, ident)
+
     counts = [0] * threads
     stop = threading.Event()
 
     def work(i: int) -> None:
         while not stop.is_set():
-            call(PAYLOAD)
-            counts[i] += 1
+            if METHOD_NAME == "Stream":
+                for _ in call(PAYLOAD):
+                    counts[i] += 1
+            else:
+                call(PAYLOAD)
+                counts[i] += 1
 
     workers = [
-        threading.Thread(target=work, args=(i,), daemon=True) for i in range(threads)
+        threading.Thread(target=work, args=(i,), daemon=True)
+        for i in range(threads)
     ]
-    call(PAYLOAD)
+
+    if METHOD_NAME == "Stream":
+        for _ in call(PAYLOAD): pass
+    else:
+        call(PAYLOAD)
+        
     ready.put(1)
+
     cpu0, t0 = time.process_time(), time.perf_counter()
     for w in workers:
         w.start()
+
     time.sleep(DUR)
     stop.set()
+
     for w in workers:
         w.join()
+
     out.put((sum(counts), time.perf_counter() - t0, time.process_time() - cpu0))
     out.close()
     out.join_thread()
     os._exit(0)
-
 
 def main() -> None:
     kind, procs, threads = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
+
     ctx = mp.get_context("spawn")
     server = ctx.Process(target=serve, args=(kind, port), daemon=True)
     server.start()
+
     out, ready = ctx.Queue(), ctx.Queue()
+
     clients = [
         ctx.Process(target=client, args=(port, threads, out, ready))
         for _ in range(procs)
@@ -132,16 +171,19 @@ def main() -> None:
         c.start()
     for _ in clients:
         ready.get(timeout=60)
+
     results = [out.get(timeout=DUR + 60) for _ in clients]
     server.kill()
+
     calls = sum(r[0] for r in results)
     rate = sum(r[0] / r[1] for r in results)
     cpu_us = 1e6 * sum(r[2] for r in results) / calls
+
+    unit = "msgs/s" if METHOD_NAME == "Stream" else "calls/s"
     print(
-        f"{kind:11s} {procs}x{threads}: {rate:9,.0f} calls/s  client CPU {cpu_us:6.1f} us/call",
+        f"{kind:11s} {procs}x{threads}: {rate:9,.0f} {unit}  client CPU {cpu_us:6.1f} us/call",
         flush=True,
     )
-
 
 if __name__ == "__main__":
     main()
