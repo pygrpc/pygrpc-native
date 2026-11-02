@@ -5,16 +5,17 @@ import asyncio
 import grpc
 
 from examples.aio_server import make_server as make_aio_server
-from examples.greeter import METHOD_NAME, deserialize, serialize
 from examples.sync_server import make_server as make_sync_server
+
+METHOD_NAME = "/examples.Greeter/Greet"
 
 
 def _call_grpcio_client(port: int) -> str:
     with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
         greet = channel.unary_unary(
             METHOD_NAME,
-            request_serializer=serialize,
-            response_deserializer=deserialize,
+            request_serializer=str.encode,
+            response_deserializer=bytes.decode,
         )
         return greet("world", timeout=5)
 

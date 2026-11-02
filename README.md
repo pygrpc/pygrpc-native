@@ -75,15 +75,15 @@ For `grpc.aio`:
  await server.wait_for_termination()
 ```
 
+For runnable sync and asyncio servers with a grpcio client, see
+[examples/README.md](examples/README.md).
+
 To build from source:
 
 ```bash
 pip install maturin
 maturin develop --release
 ```
-
-For runnable sync and asyncio servers with a grpcio client, see
-[examples/README.md](examples/README.md).
 
 ## How it works
 

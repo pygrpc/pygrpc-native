@@ -2,15 +2,15 @@
 
 import grpc
 
-from examples.greeter import METHOD_NAME, deserialize, serialize
+METHOD_NAME = "/examples.Greeter/Greet"
 
 
 def main() -> None:
     with grpc.insecure_channel("127.0.0.1:50051") as channel:
         greet = channel.unary_unary(
             METHOD_NAME,
-            request_serializer=serialize,
-            response_deserializer=deserialize,
+            request_serializer=str.encode,
+            response_deserializer=bytes.decode,
         )
         print(greet("world", timeout=5))
 

@@ -4,15 +4,13 @@ The examples use `grpc.method_handlers_generic_handler` with a UTF-8 string
 payload, so they do not need a `.proto` file or generated code. The same
 grpcio client works with either server.
 
-From the repository root, create and activate a virtual environment, then
-build the checkout into it:
+Install the package and grpcio from the repository root:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
-python -m pip install maturin grpcio
-maturin develop --release
+pip install pygrpc-native grpcio
 ```
+
+To build from source, see [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 In one terminal, start either server:
 

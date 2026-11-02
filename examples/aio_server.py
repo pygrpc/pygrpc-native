@@ -5,15 +5,20 @@ import asyncio
 import grpc
 import pygrpc_native.aio
 
-from examples.greeter import greeting, make_handler
+
+def greet(name: bytes, context: grpc.aio.ServicerContext) -> bytes:
+    return f"Hello, {name.decode('utf-8')}!".encode("utf-8")
 
 
-async def greet(name: bytes, context: grpc.aio.ServicerContext) -> bytes:
-    return greeting(name)
+handler = grpc.method_handlers_generic_handler(
+    "examples.Greeter",
+    {"Greet": grpc.unary_unary_rpc_method_handler(greet)},
+)
 
 
 def make_server(address: str = "127.0.0.1:50051"):
-    server = pygrpc_native.aio.server(handlers=[make_handler(greet)])
+    server = pygrpc_native.aio.server()  # was grpc.aio.server()
+    server.add_generic_rpc_handlers((handler,))
     port = server.add_insecure_port(address)
     return server, port
 
@@ -29,4 +34,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
