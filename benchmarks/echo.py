@@ -1,13 +1,16 @@
 """Echo benchmark for grpc sync, grpc aio and pygrpc-native.
 
+Supports unary and server-streaming methods.
 Usage: python benchmarks/echo.py <kind> <procs> <threads>
 
 kind is sync or aio for grpcio, native-sync or native-aio for
 pygrpc_native.server() and pygrpc_native.aio.server(), or native for the
 low-level API.
 
-DUR sets the seconds measured (default 5) and SIZE the payload bytes
-(default 64). METRICS=1 turns on the native front's metrics.
+DUR sets the seconds measured (default 5), SIZE the payload bytes
+(default 64), METHOD the rpc type (unary or stream, default unary),
+and STREAM_COUNT the messages per stream (default 10).
+METRICS=1 turns on the native front's metrics.
 """
 
 import multiprocessing as mp
@@ -21,7 +24,16 @@ import grpc
 
 PAYLOAD = os.urandom(int(os.environ.get("SIZE", "64")))
 DUR = float(os.environ.get("DUR", "5"))
-METHOD = "/bench.Echo/Unary"
+METHOD_TYPE = os.environ.get("METHOD", "unary").lower()
+if METHOD_TYPE not in ("unary", "stream"):
+    print(f"Unknown METHOD: {METHOD_TYPE}", file=sys.stderr)
+    sys.exit(1)
+STREAM_COUNT = int(os.environ.get("STREAM_COUNT", "10"))
+if STREAM_COUNT < 1:
+    print("STREAM_COUNT must be at least 1", file=sys.stderr)
+    sys.exit(1)
+METHOD_NAME = "Stream" if METHOD_TYPE == "stream" else "Unary"
+METHOD = f"/bench.Echo/{METHOD_NAME}"
 
 
 def ident(b: bytes) -> bytes:
@@ -49,6 +61,10 @@ def serve(kind: str, port: int) -> None:
             async def unary(req: bytes, ctx: object) -> bytes:
                 return req
 
+            async def server_stream(req: bytes, ctx: object):
+                for _ in range(STREAM_COUNT):
+                    yield req
+
             if kind == "aio":
                 server = grpc.aio.server()
             else:
@@ -57,7 +73,12 @@ def serve(kind: str, port: int) -> None:
                 server = pygrpc_native.aio.server()
             server.add_registered_method_handlers(
                 "bench.Echo",
-                {"Unary": grpc.unary_unary_rpc_method_handler(unary, ident, ident)},
+                {
+                    "Unary": grpc.unary_unary_rpc_method_handler(unary, ident, ident),
+                    "Stream": grpc.unary_stream_rpc_method_handler(
+                        server_stream, ident, ident
+                    ),
+                },
             )
             server.add_insecure_port(target)
             await server.start()
@@ -70,6 +91,10 @@ def serve(kind: str, port: int) -> None:
     def unary(req: bytes, ctx: object) -> bytes:
         return req
 
+    def server_stream(req: bytes, ctx: object):
+        for _ in range(STREAM_COUNT):
+            yield req
+
     if kind == "sync":
         server = grpc.server(ThreadPoolExecutor(64))
     else:
@@ -78,7 +103,10 @@ def serve(kind: str, port: int) -> None:
         server = pygrpc_native.server(ThreadPoolExecutor(64))
     server.add_registered_method_handlers(
         "bench.Echo",
-        {"Unary": grpc.unary_unary_rpc_method_handler(unary, ident, ident)},
+        {
+            "Unary": grpc.unary_unary_rpc_method_handler(unary, ident, ident),
+            "Stream": grpc.unary_stream_rpc_method_handler(server_stream, ident, ident),
+        },
     )
     server.add_insecure_port(target)
     server.start()
@@ -88,19 +116,34 @@ def serve(kind: str, port: int) -> None:
 def client(port: int, threads: int, out: mp.Queue, ready: mp.Queue) -> None:
     channel = grpc.insecure_channel(f"127.0.0.1:{port}")
     grpc.channel_ready_future(channel).result(30)
-    call = channel.unary_unary(METHOD, ident, ident)
+    if METHOD_NAME == "Stream":
+        call = channel.unary_stream(METHOD, ident, ident)
+    else:
+        call = channel.unary_unary(METHOD, ident, ident)
     counts = [0] * threads
     stop = threading.Event()
 
-    def work(i: int) -> None:
-        while not stop.is_set():
-            call(PAYLOAD)
-            counts[i] += 1
+    if METHOD_NAME == "Stream":
+
+        def work(i: int) -> None:
+            while not stop.is_set():
+                for _ in call(PAYLOAD):
+                    counts[i] += 1
+    else:
+
+        def work(i: int) -> None:
+            while not stop.is_set():
+                call(PAYLOAD)
+                counts[i] += 1
 
     workers = [
         threading.Thread(target=work, args=(i,), daemon=True) for i in range(threads)
     ]
-    call(PAYLOAD)
+    if METHOD_NAME == "Stream":
+        for _ in call(PAYLOAD):
+            pass
+    else:
+        call(PAYLOAD)
     ready.put(1)
     cpu0, t0 = time.process_time(), time.perf_counter()
     for w in workers:
@@ -117,6 +160,9 @@ def client(port: int, threads: int, out: mp.Queue, ready: mp.Queue) -> None:
 
 def main() -> None:
     kind, procs, threads = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+    if kind == "native" and METHOD_NAME == "Stream":
+        print("The 'native' kind does not support METHOD=stream.", file=sys.stderr)
+        sys.exit(1)
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
@@ -137,8 +183,10 @@ def main() -> None:
     calls = sum(r[0] for r in results)
     rate = sum(r[0] / r[1] for r in results)
     cpu_us = 1e6 * sum(r[2] for r in results) / calls
+    unit = "msgs/s" if METHOD_NAME == "Stream" else "calls/s"
+    cpu_unit = "us/msg" if METHOD_NAME == "Stream" else "us/call"
     print(
-        f"{kind:11s} {procs}x{threads}: {rate:9,.0f} calls/s  client CPU {cpu_us:6.1f} us/call",
+        f"{kind:11s} {procs}x{threads}: {rate:9,.0f} {unit}  client CPU {cpu_us:6.1f} {cpu_unit}",
         flush=True,
     )
 
