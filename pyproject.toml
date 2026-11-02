@@ -28,3 +28,6 @@ module-name = "pygrpc_native._native"
 include = [{ path = "vendor/**/*", format = "sdist" }]
 # The README's images are served from GitHub.
 exclude = [{ path = "assets/**/*", format = "sdist" }]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]

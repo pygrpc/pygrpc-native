@@ -75,6 +75,9 @@ For `grpc.aio`:
  await server.wait_for_termination()
 ```
 
+For runnable sync and asyncio servers with a grpcio client, see
+[examples/README.md](https://github.com/pygrpc/pygrpc-native/blob/main/examples/README.md).
+
 To build from source:
 
 ```bash
