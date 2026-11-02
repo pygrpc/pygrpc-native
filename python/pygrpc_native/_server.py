@@ -914,8 +914,11 @@ def server(
     options: Iterable[tuple[str, Any]] | None = None,
     maximum_concurrent_rpcs: int | None = None,
     compression: grpc.Compression | None = None,
+    xds: bool = False,
 ) -> Server:
     """Like ``grpc.server()``, on the native front."""
+    if xds:
+        raise NotImplementedError("xDS isn't supported")
     return Server(
         thread_pool,
         handlers=handlers,

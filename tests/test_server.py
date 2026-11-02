@@ -376,7 +376,9 @@ def test_unsupported_features_are_rejected(pb: tuple[Any, Any]) -> None:
     pool = futures.ThreadPoolExecutor(1)
     with pytest.raises(ValueError, match="unsupported server option"):
         pygrpc_native.server(pool, options=[("grpc.max_connection_idle_ms", 1000)])
-    server = pygrpc_native.server(pool)
+    with pytest.raises(NotImplementedError):
+        pygrpc_native.server(pool, xds=True)
+    server = pygrpc_native.server(pool, xds=False)
     with pytest.raises(NotImplementedError):
         server.add_secure_port("127.0.0.1:0", object())  # type: ignore[arg-type]
     server.add_insecure_port("127.0.0.1:0")
