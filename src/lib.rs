@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
-use crossbeam_channel::{Receiver, RecvTimeoutError};
+use crossbeam_channel::{Receiver, RecvTimeoutError, TryRecvError};
 use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedBytes;
@@ -357,6 +357,42 @@ impl NativeGrpcFront {
         timeout_ms: Option<u64>,
     ) -> PyResult<Option<Bound<'py, PyList>>> {
         self.recv(py, max_events, timeout_ms, event_tuple)
+    }
+
+    /// A file descriptor that turns readable when events are queued.
+    fn _wake_fd(&self) -> PyResult<i32> {
+        self.shared
+            .wake_fd()
+            .map_err(|err| PyOSError::new_err(err.to_string()))
+    }
+
+    /// Takes the queued events without waiting. None once closed.
+    fn _poll_batch_details<'py>(
+        &self,
+        py: Python<'py>,
+        max_events: usize,
+    ) -> PyResult<Option<Bound<'py, PyList>>> {
+        if max_events == 0 {
+            return Err(PyValueError::new_err("max_events must be greater than 0"));
+        }
+        self.shared.rearm();
+        let mut batch = Vec::new();
+        let mut closed = self.shared.is_closed() && self.events.is_empty();
+        while !closed && batch.len() < max_events {
+            match self.events.try_recv() {
+                Ok(Event::Closed) | Err(TryRecvError::Disconnected) => closed = true,
+                Ok(event) => batch.push(event),
+                Err(TryRecvError::Empty) => break,
+            }
+        }
+        if closed && batch.is_empty() {
+            return Ok(None);
+        }
+        let items = PyList::empty(py);
+        for event in batch {
+            items.append(event_details_tuple(py, event)?)?;
+        }
+        Ok(Some(items))
     }
 
     /// Like ``recv_batch``, with a sixth item on every event:

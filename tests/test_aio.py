@@ -4,6 +4,7 @@ import asyncio
 import importlib
 import subprocess
 import sys
+import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from concurrent import futures
 from typing import Any, cast
@@ -736,3 +737,46 @@ def test_sync_handlers_get_grpcio_sync_context() -> None:
     assert native == asyncio.run(run(aio.server, stream_abort=False))
     assert native_called == called == ["done"]
     assert native["Abort"] == (grpc.StatusCode.PERMISSION_DENIED, "denied")
+
+
+def _echo_server() -> tuple[pygrpc_native.aio.Server, int]:
+    async def echo(request: bytes, context: aio.ServicerContext) -> bytes:
+        return request
+
+    server = pygrpc_native.aio.server()
+    server.add_registered_method_handlers(
+        "t.S", {"U": grpc.unary_unary_rpc_method_handler(echo)}
+    )
+    return server, server.add_insecure_port("127.0.0.1:0")
+
+
+def test_calls_queued_past_one_poll_are_all_answered() -> None:
+    async def main() -> None:
+        server, port = _echo_server()
+        await server.start()
+        try:
+            with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+                call = channel.unary_unary("/t.S/U")
+                pending = [call.future(bytes([i])) for i in range(200)]
+                # Block the loop so the calls queue up behind it.
+                time.sleep(1)
+                loop = asyncio.get_running_loop()
+                replies = await asyncio.gather(
+                    *(loop.run_in_executor(None, f.result, 10) for f in pending)
+                )
+            assert replies == [bytes([i]) for i in range(200)]
+        finally:
+            await server.stop(None)
+
+    asyncio.run(main())
+
+
+def test_a_server_whose_loop_closes_without_stop_stops_serving() -> None:
+    server, port = _echo_server()
+    loop = asyncio.new_event_loop()
+    loop.run_until_complete(server.start())
+    loop.close()
+    with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+        with pytest.raises(grpc.RpcError) as info:
+            channel.unary_unary("/t.S/U")(b"x", timeout=10)
+    assert info.value.code() == grpc.StatusCode.UNAVAILABLE
