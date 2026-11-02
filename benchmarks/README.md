@@ -1,17 +1,19 @@
 # Benchmarks
 
-`echo.py` starts a server with empty unary and server-streaming handlers and calls it from
-grpcio clients for a few seconds.
+`echo.py` starts a server with empty unary and server-streaming handlers
+and calls it from grpcio clients for a few seconds.
 
 ```bash
 pip install grpcio pygrpc-native
-python benchmarks/echo.py native-aio 8 4    # server kind, client processes, threads each
+python benchmarks/echo.py native-aio 8 4
 ```
 
 The kinds are `sync` and `aio` for grpcio's servers, `native-sync` and
 `native-aio` for `pygrpc_native.server()` and `pygrpc_native.aio.server()`,
-and `native` for the low-level API. `DUR` (default 5) and `SIZE` (default 64) change the seconds measured and the
-payload bytes. `METHOD` (unary or stream) and `STREAM_COUNT` (default 10) configure the streaming benchmark. The server and the clients share the machine.
+and `native` for the low-level API. `DUR` (default 5) and `SIZE` (default 64)
+change the seconds measured and the payload bytes.
+`METHOD` (unary or stream) and `STREAM_COUNT` (default 10) configure the
+streaming benchmark. The server and the clients share the machine.
 
 ```bash
 METHOD=stream python benchmarks/echo.py native-aio 8 4

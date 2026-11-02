@@ -1,15 +1,15 @@
 """Echo benchmark for grpc sync, grpc aio and pygrpc-native.
 
 Supports unary and server-streaming methods.
-
 Usage: python benchmarks/echo.py <kind> <procs> <threads>
 
 kind is sync or aio for grpcio, native-sync or native-aio for
 pygrpc_native.server() and pygrpc_native.aio.server(), or native for the
 low-level API.
 
-DUR sets the seconds measured (default 5) and SIZE the payload bytes
-(default 64). METRICS=1 turns on the native front's metrics.
+DUR sets the seconds measured (default 5), SIZE the payload bytes
+(default 64), METHOD the rpc type (unary or stream, default unary),
+and STREAM_COUNT the messages per stream (default 10). METRICS=1 turns on the native front's metrics.
 """
 
 import multiprocessing as mp
@@ -23,7 +23,6 @@ import grpc
 
 PAYLOAD = os.urandom(int(os.environ.get("SIZE", "64")))
 DUR = float(os.environ.get("DUR", "5"))
-
 METHOD_TYPE = os.environ.get("METHOD", "unary").lower()
 if METHOD_TYPE not in ("unary", "stream"):
     print(f"Unknown METHOD: {METHOD_TYPE}", file=sys.stderr)
@@ -39,24 +38,18 @@ def ident(b: bytes) -> bytes:
 
 def serve(kind: str, port: int) -> None:
     target = f"127.0.0.1:{port}"
-
     if kind == "native":
-        if METHOD_NAME == "Stream":
-            print("The 'native' kind does not support METHOD=stream.", file=sys.stderr)
-            sys.exit(1)
         from pygrpc_native import EVENT_CALL, NativeGrpcFront
 
         # Only when asked, so the script still runs against older releases.
         extra = {"metrics": True} if os.environ.get("METRICS") == "1" else {}
         front = NativeGrpcFront(target, [(METHOD, False)], **extra)
         front.start()
-
         while (events := front.recv_batch(256)) is not None:
             for ev_kind, call_id, _, payload, _ in events:
                 if ev_kind == EVENT_CALL:
                     front.respond(call_id, payload)
         return
-
     if kind in ("aio", "native-aio"):
         import asyncio
 
@@ -74,7 +67,6 @@ def serve(kind: str, port: int) -> None:
                 import pygrpc_native.aio
 
                 server = pygrpc_native.aio.server()
-
             server.add_registered_method_handlers(
                 "bench.Echo",
                 {
@@ -90,7 +82,6 @@ def serve(kind: str, port: int) -> None:
 
         asyncio.run(main())
         return
-
     from concurrent.futures import ThreadPoolExecutor
 
     def unary(req: bytes, ctx: object) -> bytes:
@@ -99,14 +90,12 @@ def serve(kind: str, port: int) -> None:
     def server_stream(req: bytes, ctx: object):
         for _ in range(STREAM_COUNT):
             yield req
-
     if kind == "sync":
         server = grpc.server(ThreadPoolExecutor(64))
     else:
         import pygrpc_native
 
         server = pygrpc_native.server(ThreadPoolExecutor(64))
-
     server.add_registered_method_handlers(
         "bench.Echo",
         {
@@ -122,24 +111,19 @@ def serve(kind: str, port: int) -> None:
 def client(port: int, threads: int, out: mp.Queue, ready: mp.Queue) -> None:
     channel = grpc.insecure_channel(f"127.0.0.1:{port}")
     grpc.channel_ready_future(channel).result(30)
-
     if METHOD_NAME == "Stream":
         call = channel.unary_stream(METHOD, ident, ident)
     else:
         call = channel.unary_unary(METHOD, ident, ident)
-
     counts = [0] * threads
     stop = threading.Event()
 
     if METHOD_NAME == "Stream":
-
         def work(i: int) -> None:
             while not stop.is_set():
                 for _ in call(PAYLOAD):
                     counts[i] += 1
-
     else:
-
         def work(i: int) -> None:
             while not stop.is_set():
                 call(PAYLOAD)
@@ -154,19 +138,14 @@ def client(port: int, threads: int, out: mp.Queue, ready: mp.Queue) -> None:
             pass
     else:
         call(PAYLOAD)
-
     ready.put(1)
-
     cpu0, t0 = time.process_time(), time.perf_counter()
     for w in workers:
         w.start()
-
     time.sleep(DUR)
     stop.set()
-
     for w in workers:
         w.join()
-
     out.put((sum(counts), time.perf_counter() - t0, time.process_time() - cpu0))
     out.close()
     out.join_thread()
@@ -175,16 +154,16 @@ def client(port: int, threads: int, out: mp.Queue, ready: mp.Queue) -> None:
 
 def main() -> None:
     kind, procs, threads = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+    if kind=='native' and METHOD_NAME=='Stream':
+        print("The 'native kind does not support METHOD=stream.", file=sys.stderr)
+        sys.exit(1)
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
-
     ctx = mp.get_context("spawn")
     server = ctx.Process(target=serve, args=(kind, port), daemon=True)
     server.start()
-
     out, ready = ctx.Queue(), ctx.Queue()
-
     clients = [
         ctx.Process(target=client, args=(port, threads, out, ready))
         for _ in range(procs)
@@ -193,14 +172,11 @@ def main() -> None:
         c.start()
     for _ in clients:
         ready.get(timeout=60)
-
     results = [out.get(timeout=DUR + 60) for _ in clients]
     server.kill()
-
     calls = sum(r[0] for r in results)
     rate = sum(r[0] / r[1] for r in results)
     cpu_us = 1e6 * sum(r[2] for r in results) / calls
-
     unit = "msgs/s" if METHOD_NAME == "Stream" else "calls/s"
     cpu_unit = "us/msg" if METHOD_NAME == "Stream" else "us/call"
     print(
