@@ -9,7 +9,8 @@ low-level API.
 
 DUR sets the seconds measured (default 5), SIZE the payload bytes
 (default 64), METHOD the rpc type (unary or stream, default unary),
-and STREAM_COUNT the messages per stream (default 10). METRICS=1 turns on the native front's metrics.
+and STREAM_COUNT the messages per stream (default 10).
+METRICS=1 turns on the native front's metrics.
 """
 
 import multiprocessing as mp
@@ -90,6 +91,7 @@ def serve(kind: str, port: int) -> None:
     def server_stream(req: bytes, ctx: object):
         for _ in range(STREAM_COUNT):
             yield req
+
     if kind == "sync":
         server = grpc.server(ThreadPoolExecutor(64))
     else:
@@ -119,11 +121,14 @@ def client(port: int, threads: int, out: mp.Queue, ready: mp.Queue) -> None:
     stop = threading.Event()
 
     if METHOD_NAME == "Stream":
+
         def work(i: int) -> None:
             while not stop.is_set():
                 for _ in call(PAYLOAD):
                     counts[i] += 1
+
     else:
+
         def work(i: int) -> None:
             while not stop.is_set():
                 call(PAYLOAD)
@@ -154,7 +159,7 @@ def client(port: int, threads: int, out: mp.Queue, ready: mp.Queue) -> None:
 
 def main() -> None:
     kind, procs, threads = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
-    if kind=='native' and METHOD_NAME=='Stream':
+    if kind == "native" and METHOD_NAME == "Stream":
         print("The 'native kind does not support METHOD=stream.", file=sys.stderr)
         sys.exit(1)
     with socket.socket() as s:
