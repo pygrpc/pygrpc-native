@@ -10,6 +10,7 @@ readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.10"
 dependencies = []
+keywords = ["grpc", "grpcio", "asyncio", "http2", "rust", "pyo3", "performance"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Rust",
