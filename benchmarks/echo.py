@@ -1,5 +1,7 @@
 """Echo benchmark for grpc sync, grpc aio and pygrpc-native.
 
+Supports unary and server-streaming methods.
+
 Usage: python benchmarks/echo.py <kind> <procs> <threads>
 
 kind is sync or aio for grpcio, native-sync or native-aio for
@@ -23,8 +25,11 @@ PAYLOAD = os.urandom(int(os.environ.get("SIZE", "64")))
 DUR = float(os.environ.get("DUR", "5"))
 
 METHOD_TYPE = os.environ.get("METHOD", "unary").lower()
+if METHOD_TYPE not in ("unary", "stream"):
+    print(f"Unknown METHOD: {METHOD_TYPE}", file=sys.stderr)
+    sys.exit(1)
 STREAM_COUNT = int(os.environ.get("STREAM_COUNT", "10"))
-METHOD_NAME = "Stream" if METHOD_TYPE in ("stream", "server_streaming") else "Unary"
+METHOD_NAME = "Stream" if METHOD_TYPE == "stream" else "Unary"
 METHOD = f"/bench.Echo/{METHOD_NAME}"
 
 
@@ -36,8 +41,12 @@ def serve(kind: str, port: int) -> None:
     target = f"127.0.0.1:{port}"
 
     if kind == "native":
+        if METHOD_NAME == 'Stream':
+            print("The 'native' kind does not support METHOD=stream.", file=sys.stderr)
+            sys.exit(1)
         from pygrpc_native import EVENT_CALL, NativeGrpcFront
 
+        # Only when asked, so the script still runs against older releases.
         extra = {"metrics": True} if os.environ.get("METRICS") == "1" else {}
         front = NativeGrpcFront(target, [(METHOD, False)], **extra)
         front.start()
@@ -122,12 +131,14 @@ def client(port: int, threads: int, out: mp.Queue, ready: mp.Queue) -> None:
     counts = [0] * threads
     stop = threading.Event()
 
-    def work(i: int) -> None:
-        while not stop.is_set():
-            if METHOD_NAME == "Stream":
-                for _ in call(PAYLOAD):
-                    counts[i] += 1
-            else:
+    if METHOD_NAME == "Stream":
+        def work(i: int) -> None:
+            while not stop.is_set():
+                    for _ in call(PAYLOAD):
+                        counts[i] += 1
+    else:
+        def work(i: int) -> None:
+            while not stop.is_set():
                 call(PAYLOAD)
                 counts[i] += 1
 
@@ -188,8 +199,9 @@ def main() -> None:
     cpu_us = 1e6 * sum(r[2] for r in results) / calls
 
     unit = "msgs/s" if METHOD_NAME == "Stream" else "calls/s"
+    cpu_unit = "us/msg" if METHOD_NAME == "Stream" else "us/call"
     print(
-        f"{kind:11s} {procs}x{threads}: {rate:9,.0f} {unit}  client CPU {cpu_us:6.1f} us/call",
+        f"{kind:11s} {procs}x{threads}: {rate:9,.0f} {unit}  client CPU {cpu_us:6.1f} {cpu_unit}",
         flush=True,
     )
 

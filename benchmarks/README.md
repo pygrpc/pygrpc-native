@@ -1,6 +1,6 @@
 # Benchmarks
 
-`echo.py` starts a server with an empty unary handler and calls it from
+`echo.py` starts a server with an empty unary handler and server-streaming handlers and calls it from
 grpcio clients for a few seconds.
 
 ```bash
@@ -11,7 +11,11 @@ python benchmarks/echo.py native-aio 8 4    # server kind, client processes, thr
 The kinds are `sync` and `aio` for grpcio's servers, `native-sync` and
 `native-aio` for `pygrpc_native.server()` and `pygrpc_native.aio.server()`,
 and `native` for the low-level API. `DUR` (default 5) and `SIZE` (default 64) change the seconds measured and the
-payload bytes. The server and the clients share the machine.
+payload bytes. `METHOD` (unary or stream) and `STREAM_COUNT` (default 10) configure the streaming benchmark. The server and the clients share the machine.
+
+```bash
+METHOD=stream python benchmarks/echo.py native-aio 8 4
+```
 
 Median of three runs, calls/s with the client CPU per call in brackets.
 
@@ -39,5 +43,3 @@ The clients are grpcio in every row, so at 1x1 they cost about the same
 whichever server they call. With pygrpc-native at 4x4 and 8x4 the clients make
 several times more calls on the same cores, which is why their CPU per call
 goes up.
-To test server-streaming throughput (messages/s) instead of unary calls, set `METHOD=stream`:
-`METHOD=stream python benchmarks/echo.py native-aio 8 4`
