@@ -121,19 +121,15 @@ def client(port: int, threads: int, out: mp.Queue, ready: mp.Queue) -> None:
     stop = threading.Event()
 
     if METHOD_NAME == "Stream":
-
         def work(i: int) -> None:
             while not stop.is_set():
                 for _ in call(PAYLOAD):
                     counts[i] += 1
-
     else:
-
         def work(i: int) -> None:
             while not stop.is_set():
                 call(PAYLOAD)
                 counts[i] += 1
-
     workers = [
         threading.Thread(target=work, args=(i,), daemon=True) for i in range(threads)
     ]
