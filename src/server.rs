@@ -16,8 +16,11 @@ mod stream;
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::os::unix::io::{AsRawFd, RawFd};
+use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{fence, AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
@@ -135,11 +138,31 @@ pub enum AddMethodsError {
     Duplicate(String),
 }
 
+/// The event queue, and a socket an event loop can watch for new events.
+pub struct EventSender {
+    tx: crossbeam_channel::Sender<Event>,
+    // (reader, writer)
+    wake: OnceLock<(UnixStream, UnixStream)>,
+    armed: AtomicBool,
+}
+
+impl EventSender {
+    pub fn send(&self, event: Event) -> Result<(), crossbeam_channel::SendError<Event>> {
+        let sent = self.tx.send(event);
+        if let Some((_, writer)) = self.wake.get() {
+            if !self.armed.swap(true, Ordering::SeqCst) {
+                let _ = (&*writer).write(&[1]);
+            }
+        }
+        sent
+    }
+}
+
 pub struct Shared {
     // Registered until start(), then frozen so routing needs no lock.
     pending_methods: Mutex<Vec<(String, bool)>>,
     methods: OnceLock<HashMap<String, (u32, bool)>>,
-    events: crossbeam_channel::Sender<Event>,
+    events: EventSender,
     unary: Mutex<HashMap<u64, oneshot::Sender<Reply>>>,
     streams: Mutex<HashMap<u64, StreamSlot>>,
     next_id: AtomicU64,
@@ -178,7 +201,11 @@ impl Shared {
         Shared {
             pending_methods: Mutex::new(methods),
             methods: OnceLock::new(),
-            events,
+            events: EventSender {
+                tx: events,
+                wake: OnceLock::new(),
+                armed: AtomicBool::new(false),
+            },
             unary: Mutex::new(HashMap::new()),
             streams: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
@@ -286,6 +313,28 @@ impl Shared {
 
     pub fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
+    }
+
+    pub fn wake_fd(&self) -> std::io::Result<RawFd> {
+        if self.events.wake.get().is_none() {
+            let (reader, writer) = UnixStream::pair()?;
+            reader.set_nonblocking(true)?;
+            writer.set_nonblocking(true)?;
+            let _ = self.events.wake.set((reader, writer));
+        }
+        Ok(self.events.wake.get().expect("set above").0.as_raw_fd())
+    }
+
+    /// Lets the next event write to the wake socket again.
+    pub fn rearm(&self) {
+        if let Some((reader, _)) = self.events.wake.get() {
+            let mut buf = [0u8; 64];
+            while matches!((&*reader).read(&mut buf), Ok(n) if n > 0) {}
+            self.events.armed.store(false, Ordering::SeqCst);
+            // Pairs with the swap in send(): an event queued before this is
+            // either in the caller's next try_recv or writes again.
+            fence(Ordering::SeqCst);
+        }
     }
 
     pub fn respond(&self, call_id: u64, reply: Reply) -> bool {

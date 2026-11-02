@@ -45,6 +45,7 @@ __all__ = ["Server", "server"]
 _LOGGER = logging.getLogger(__name__)
 
 _END = object()
+_EVENTS_PER_POLL = 64
 
 # grpcio's aio server sends an int from 0 to 15 as that status code.
 _INT_CODES = {c.value[0]: c for c in grpc.StatusCode if c.value[0] < 16}
@@ -408,6 +409,8 @@ class Server(_Codec, _Methods, aio.Server):
         self._started = False
         self._stopping = False
         self._terminated = asyncio.Event()
+        self._wake: int | None = None
+        self._stopped = threading.Event()
 
     def add_generic_rpc_handlers(
         self, generic_rpc_handlers: Sequence[grpc.GenericRpcHandler]
@@ -465,9 +468,11 @@ class Server(_Codec, _Methods, aio.Server):
         self._front.add_methods(
             [(path, streaming) for path, _, streaming in self._table]
         )
+        self._wake = self._front._wake_fd()
+        self._loop.add_reader(self._wake, self._poll)
         self._front.start()
         threading.Thread(
-            target=self._dispatch, name="pygrpc-native-dispatch", daemon=True
+            target=self._watch_loop, name="pygrpc-native-loop-watch", daemon=True
         ).start()
 
     async def _start_fallback(
@@ -516,6 +521,9 @@ class Server(_Codec, _Methods, aio.Server):
             await fallback
         if self._front is not None:
             await asyncio.get_running_loop().run_in_executor(None, self._front.close)
+        if self._wake is not None:
+            asyncio.get_running_loop().remove_reader(self._wake)
+        self._stopped.set()
         if self._fallback_dir is not None:
             shutil.rmtree(self._fallback_dir, ignore_errors=True)
         self._terminated.set()
@@ -527,14 +535,25 @@ class Server(_Codec, _Methods, aio.Server):
             return True
         return False
 
-    def _dispatch(self) -> None:
+    def _poll(self) -> None:
         front, loop = self._front, self._loop
         assert front is not None and loop is not None
-        while (events := front.recv_batch_details(64)) is not None:
-            try:
-                loop.call_soon_threadsafe(self._on_events, events)
-            except RuntimeError:
-                # The loop was closed without stop().
+        events = front._poll_batch_details(_EVENTS_PER_POLL)
+        if events is None:
+            loop.remove_reader(self._wake)
+            return
+        if len(events) == _EVENTS_PER_POLL:
+            # The fd won't wake again for what's still queued.
+            loop.call_soon(self._poll)
+        self._on_events(events)
+
+    def _watch_loop(self) -> None:
+        # Nothing runs on a loop closed without stop(), so clients would wait
+        # until their deadline.
+        loop, front = self._loop, self._front
+        assert loop is not None and front is not None
+        while not self._stopped.wait(1):
+            if loop.is_closed():
                 front.close()
                 return
 
