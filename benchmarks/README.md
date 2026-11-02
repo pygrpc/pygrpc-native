@@ -5,7 +5,7 @@ and calls it from grpcio clients for a few seconds.
 
 ```bash
 pip install grpcio pygrpc-native
-python benchmarks/echo.py native-aio 8 4
+python benchmarks/echo.py native-aio 8 4    # server kind, client processes, threads each
 ```
 
 The kinds are `sync` and `aio` for grpcio's servers, `native-sync` and

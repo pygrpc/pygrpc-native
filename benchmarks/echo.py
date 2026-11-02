@@ -29,6 +29,9 @@ if METHOD_TYPE not in ("unary", "stream"):
     print(f"Unknown METHOD: {METHOD_TYPE}", file=sys.stderr)
     sys.exit(1)
 STREAM_COUNT = int(os.environ.get("STREAM_COUNT", "10"))
+if STREAM_COUNT < 1:
+    print("STREAM_COUNT must be at least 1", file=sys.stderr)
+    sys.exit(1)
 METHOD_NAME = "Stream" if METHOD_TYPE == "stream" else "Unary"
 METHOD = f"/bench.Echo/{METHOD_NAME}"
 
@@ -158,7 +161,7 @@ def client(port: int, threads: int, out: mp.Queue, ready: mp.Queue) -> None:
 def main() -> None:
     kind, procs, threads = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
     if kind == "native" and METHOD_NAME == "Stream":
-        print("The 'native kind does not support METHOD=stream.", file=sys.stderr)
+        print("The 'native' kind does not support METHOD=stream.", file=sys.stderr)
         sys.exit(1)
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
