@@ -100,8 +100,10 @@ def serve(kind: str, port: int) -> None:
         server = pygrpc_native.server(ThreadPoolExecutor(64))
     server.add_registered_method_handlers(
         "bench.Echo",
-        {"Unary": grpc.unary_unary_rpc_method_handler(unary, ident, ident),
-         "Stream": grpc.unary_stream_rpc_method_handler(server_stream, ident, ident),},
+        {
+            "Unary": grpc.unary_unary_rpc_method_handler(unary, ident, ident),
+            "Stream": grpc.unary_stream_rpc_method_handler(server_stream, ident, ident),
+        },
     )
     server.add_insecure_port(target)
     server.start()
@@ -119,15 +121,18 @@ def client(port: int, threads: int, out: mp.Queue, ready: mp.Queue) -> None:
     stop = threading.Event()
 
     if METHOD_NAME == "Stream":
+
         def work(i: int) -> None:
             while not stop.is_set():
                 for _ in call(PAYLOAD):
                     counts[i] += 1
     else:
+
         def work(i: int) -> None:
             while not stop.is_set():
                 call(PAYLOAD)
                 counts[i] += 1
+
     workers = [
         threading.Thread(target=work, args=(i,), daemon=True) for i in range(threads)
     ]
