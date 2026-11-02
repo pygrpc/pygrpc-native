@@ -121,7 +121,7 @@ the socket. The native server listens on a single insecure port.
 | | Options |
 |:--|:--|
 | Same as grpcio | `grpc.max_receive_message_length`, `grpc.max_send_message_length`, `grpc.keepalive_time_ms`, `grpc.keepalive_timeout_ms`, `grpc.keepalive_permit_without_calls`, `grpc.max_concurrent_streams`, `grpc.max_metadata_size`, `grpc.absolute_max_metadata_size`, `grpc.so_reuseport`, `maximum_concurrent_rpcs` |
-| Raise an error | `grpc.max_connection_age_ms`, `grpc.max_connection_age_grace_ms`, `grpc.max_connection_idle_ms`, `grpc.max_allowed_incoming_connections`, response compression, TLS |
+| Raise an error | `grpc.max_connection_age_ms`, `grpc.max_connection_age_grace_ms`, `grpc.max_connection_idle_ms`, `grpc.max_allowed_incoming_connections`, response compression, TLS, `xds=True` |
 | Ignored | Everything else. grpcio also ignores the many options that only clients read. This includes the limits on client pings, which are accepted but not enforced, and `grpc.http2.max_frame_size`, which grpc-core's flow control overrides anyway. |
 
 As in grpcio, a value that isn't an integer is ignored.
