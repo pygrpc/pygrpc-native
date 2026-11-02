@@ -82,6 +82,9 @@ pip install maturin
 maturin develop --release
 ```
 
+For runnable sync and asyncio servers with a grpcio client, see
+[examples/README.md](examples/README.md).
+
 ## How it works
 
 Every call reaches Python as an event: an id, the method, the request bytes
