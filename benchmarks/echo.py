@@ -41,7 +41,7 @@ def serve(kind: str, port: int) -> None:
     target = f"127.0.0.1:{port}"
 
     if kind == "native":
-        if METHOD_NAME == 'Stream':
+        if METHOD_NAME == "Stream":
             print("The 'native' kind does not support METHOD=stream.", file=sys.stderr)
             sys.exit(1)
         from pygrpc_native import EVENT_CALL, NativeGrpcFront
@@ -132,11 +132,14 @@ def client(port: int, threads: int, out: mp.Queue, ready: mp.Queue) -> None:
     stop = threading.Event()
 
     if METHOD_NAME == "Stream":
+
         def work(i: int) -> None:
             while not stop.is_set():
-                    for _ in call(PAYLOAD):
-                        counts[i] += 1
+                for _ in call(PAYLOAD):
+                    counts[i] += 1
+
     else:
+
         def work(i: int) -> None:
             while not stop.is_set():
                 call(PAYLOAD)

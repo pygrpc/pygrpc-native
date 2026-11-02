@@ -1,6 +1,6 @@
 # Benchmarks
 
-`echo.py` starts a server with an empty unary handler and server-streaming handlers and calls it from
+`echo.py` starts a server with empty unary and server-streaming handlers and calls it from
 grpcio clients for a few seconds.
 
 ```bash
