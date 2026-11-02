@@ -6,7 +6,7 @@ import grpc
 import pygrpc_native.aio
 
 
-def greet(name: bytes, context: grpc.aio.ServicerContext) -> bytes:
+async def greet(name: bytes, context: grpc.aio.ServicerContext) -> bytes:
     return f"Hello, {name.decode('utf-8')}!".encode("utf-8")
 
 
@@ -17,7 +17,8 @@ handler = grpc.method_handlers_generic_handler(
 
 
 def make_server(address: str = "127.0.0.1:50051"):
-    server = pygrpc_native.aio.server()  # was grpc.aio.server()
+    # was grpc.aio.server()
+    server = pygrpc_native.aio.server()
     server.add_generic_rpc_handlers((handler,))
     port = server.add_insecure_port(address)
     return server, port
