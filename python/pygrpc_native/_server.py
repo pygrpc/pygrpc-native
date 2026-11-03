@@ -69,6 +69,15 @@ def _code(code: grpc.StatusCode) -> int:
     return grpc.StatusCode.UNKNOWN.value[0]
 
 
+def _answer(send: Callable[[], object]) -> None:
+    # For metadata it can't send, the front has already ended the call with
+    # INTERNAL, as grpcio does.
+    try:
+        send()
+    except ValueError as exc:
+        _LOGGER.error("Invalid response metadata: %s", exc)
+
+
 def _limit(value: int) -> int | None:
     return None if value < 0 else value
 
@@ -808,11 +817,13 @@ class Server(_Codec, _Methods, grpc.Server):
         if code == grpc.StatusCode.OK:
             code = grpc.StatusCode.UNKNOWN
         details = details if context._details is None else context._details
-        front.fail(
-            call.call_id,
-            _code(code),
-            details,
-            trailing_metadata=list(context._trailing_metadata),
+        _answer(
+            lambda: front.fail(
+                call.call_id,
+                _code(code),
+                details,
+                trailing_metadata=list(context._trailing_metadata),
+            )
         )
 
     def _run_unary(self, call: _Call, payload: bytes) -> None:
@@ -843,13 +854,17 @@ class Server(_Codec, _Methods, grpc.Server):
                 return
             data = self._serialize(call, response)
             if data is not None:
-                self._front.respond(  # type: ignore[union-attr]
-                    call.call_id,
-                    data,
-                    initial_metadata=None
-                    if context._initial_metadata is None
-                    else list(context._initial_metadata),
-                    trailing_metadata=list(context._trailing_metadata),
+                front = self._front
+                assert front is not None
+                _answer(
+                    lambda: front.respond(
+                        call.call_id,
+                        data,
+                        initial_metadata=None
+                        if context._initial_metadata is None
+                        else list(context._initial_metadata),
+                        trailing_metadata=list(context._trailing_metadata),
+                    )
                 )
         finally:
             self._calls.pop(call.call_id, None)
@@ -896,8 +911,10 @@ class Server(_Codec, _Methods, grpc.Server):
             if context._code not in (None, grpc.StatusCode.OK):
                 self._fail(call, context, grpc.StatusCode.UNKNOWN, "")
             else:
-                front.stream_end(
-                    call.call_id, trailing_metadata=list(context._trailing_metadata)
+                _answer(
+                    lambda: front.stream_end(
+                        call.call_id, trailing_metadata=list(context._trailing_metadata)
+                    )
                 )
         finally:
             close = getattr(responses, "close", None)

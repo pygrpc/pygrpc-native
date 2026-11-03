@@ -347,6 +347,60 @@ def test_initial_metadata_twice_is_rejected(pb: tuple[Any, Any], kind: str) -> N
     assert errors == ["Initial metadata no longer allowed!"]
 
 
+BAD_METADATA = (("X-Upper", "x"),)
+
+
+def _bad_initial(request: Any, context: grpc.ServicerContext) -> Any:
+    context.send_initial_metadata(BAD_METADATA)
+    return request
+
+
+def _bad_trailing(request: Any, context: grpc.ServicerContext) -> Any:
+    context.set_trailing_metadata(BAD_METADATA)
+    return request
+
+
+def _bad_trailing_abort(request: Any, context: grpc.ServicerContext) -> Any:
+    context.set_trailing_metadata(BAD_METADATA)
+    context.abort(grpc.StatusCode.NOT_FOUND, "missing")
+
+
+def _bad_stream_initial(request: Any, context: grpc.ServicerContext) -> Any:
+    context.send_initial_metadata(BAD_METADATA)
+    yield request
+
+
+def _bad_stream_trailing(request: Any, context: grpc.ServicerContext) -> Any:
+    context.set_trailing_metadata(BAD_METADATA)
+    yield request
+
+
+@pytest.mark.parametrize("behavior", [_bad_initial, _bad_trailing, _bad_trailing_abort])
+def test_unary_with_invalid_metadata_fails(
+    pb: tuple[Any, Any], kind: str, behavior: Behavior
+) -> None:
+    assert _unary(pb, kind, behavior) == (
+        grpc.StatusCode.INTERNAL,
+        "Invalid metadata",
+        [],
+    )
+
+
+@pytest.mark.parametrize(
+    ("behavior", "received"),
+    [(_bad_stream_initial, []), (_bad_stream_trailing, ["x"])],
+)
+def test_stream_with_invalid_metadata_fails(
+    pb: tuple[Any, Any], kind: str, behavior: Behavior, received: list[str]
+) -> None:
+    assert _stream(pb, kind, behavior) == (
+        received,
+        grpc.StatusCode.INTERNAL,
+        "Invalid metadata",
+        [],
+    )
+
+
 def test_lifecycle(pb: tuple[Any, Any]) -> None:
     server, port = _serve(pb, "native")
     assert isinstance(server, grpc.Server) and port > 0

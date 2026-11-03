@@ -852,6 +852,64 @@ def test_sync_handlers_get_grpcio_sync_context() -> None:
     assert native["Abort"] == (grpc.StatusCode.PERMISSION_DENIED, "denied")
 
 
+BAD_METADATA = (("X-Upper", "x"),)
+
+
+async def _bad_initial(request: Any, context: aio.ServicerContext) -> Any:
+    await context.send_initial_metadata(BAD_METADATA)
+    return request
+
+
+async def _bad_trailing(request: Any, context: aio.ServicerContext) -> Any:
+    context.set_trailing_metadata(BAD_METADATA)
+    return request
+
+
+async def _bad_trailing_abort(request: Any, context: aio.ServicerContext) -> Any:
+    context.set_trailing_metadata(BAD_METADATA)
+    await context.abort(grpc.StatusCode.NOT_FOUND, "missing")
+
+
+async def _bad_stream_initial(
+    request: Any, context: aio.ServicerContext
+) -> AsyncIterator[Any]:
+    await context.send_initial_metadata(BAD_METADATA)
+    yield request
+
+
+async def _bad_stream_trailing(
+    request: Any, context: aio.ServicerContext
+) -> AsyncIterator[Any]:
+    context.set_trailing_metadata(BAD_METADATA)
+    yield request
+
+
+@pytest.mark.parametrize("behavior", [_bad_initial, _bad_trailing, _bad_trailing_abort])
+def test_unary_with_invalid_metadata_fails(
+    pb: tuple[Any, Any], kind: str, behavior: Behavior
+) -> None:
+    assert asyncio.run(_unary(pb, kind, behavior)) == (
+        grpc.StatusCode.INTERNAL,
+        "Invalid metadata",
+        [],
+    )
+
+
+@pytest.mark.parametrize(
+    ("behavior", "received"),
+    [(_bad_stream_initial, []), (_bad_stream_trailing, ["x"])],
+)
+def test_stream_with_invalid_metadata_fails(
+    pb: tuple[Any, Any], kind: str, behavior: Behavior, received: list[str]
+) -> None:
+    assert asyncio.run(_stream(pb, kind, behavior)) == (
+        received,
+        grpc.StatusCode.INTERNAL,
+        "Invalid metadata",
+        [],
+    )
+
+
 def _echo_server() -> tuple[pygrpc_native.aio.Server, int]:
     async def echo(request: bytes, context: aio.ServicerContext) -> bytes:
         return request
