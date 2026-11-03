@@ -626,13 +626,16 @@ def test_slow_reader_gets_every_message(pb: tuple[Any, Any]) -> None:
 def test_streams_written_together_keep_their_order(pb: tuple[Any, Any]) -> None:
     a_pb2, a_pb2_grpc = pb
     # Every third message is larger than a stream may queue, so writes have
-    # to wait for room while other streams' writes are queued with them.
+    # to wait for room while messages written after a pause are held with
+    # them until the end of the loop pass.
     big = "x" * (300 << 10)
 
     async def numbered(
         request: Any, context: aio.ServicerContext
     ) -> AsyncIterator[Any]:
         for i in range(60):
+            if i % 4 == 1:
+                await asyncio.sleep(0.002)
             yield a_pb2.Msg(s=f"{i}:{big if i % 3 == 0 else ''}")
 
     async def read(stub: Any, slow: bool) -> list[str]:

@@ -46,6 +46,14 @@ _LOGGER = logging.getLogger(__name__)
 
 _END = object()
 _EVENTS_PER_POLL = 64
+# A small stream message written at least this long after the call's previous
+# one came from a handler that waited for something, usually along with other
+# handlers, so it is held for the end of the loop pass to go out with theirs.
+# Messages written closer together, and larger ones, which fill a write on
+# their own, go out right away.
+_HOLD_AFTER = 0.001
+_HOLD_MAX = 16 * 1024
+_monotonic = time.monotonic
 
 # grpcio's aio server sends an int from 0 to 15 as that status code.
 _INT_CODES = {c.value[0]: c for c in grpc.StatusCode if c.value[0] < 16}
@@ -86,10 +94,11 @@ class _Call:
         self.done = False
         self.callbacks: list[Callable[[Any], None]] = []
         self.writable: asyncio.Future[bool] | None = None
-        # The message waiting for Server._flush, and whether the call is in
-        # Server._pending.
+        # The message waiting for Server._flush, whether the call is in
+        # Server._pending, and when the call last wrote a message.
         self.waiting: bytes | None = None
         self.pending = False
+        self.last_write: float | None = None
         # The client is gone.
         self.closed = False
 
@@ -807,7 +816,23 @@ class Server(_Codec, _Methods, aio.Server):
         data = self._encode(call, context, response)
         if data is None:
             return False
-        if call.waiting is not None:
+        now = _monotonic()
+        last, call.last_write = call.last_write, now
+        if call.waiting is None and call.writable is None:
+            if last is None or now - last < _HOLD_AFTER or len(data) >= _HOLD_MAX:
+                # Nothing of this call is held or waiting for room, and the
+                # message isn't one to hold: send it now. Handlers that send
+                # back to back take this path, so it stays as short as it can.
+                context._initial_sent = True
+                sent = self._front._stream_send_or_park(call.call_id, data)  # type: ignore[union-attr]
+                if sent != _STREAM_PARKED:
+                    return sent != STREAM_CLOSED
+                call.writable = self._loop.create_future()  # type: ignore[union-attr]
+                try:
+                    return await call.writable
+                finally:
+                    call.writable = None
+        elif call.waiting is not None:
             # At most one message of a call waits, so a call's messages
             # can't pass each other when one of them has to wait for room.
             self._send_waiting(call)
@@ -820,6 +845,8 @@ class Server(_Codec, _Methods, aio.Server):
         if call.closed:
             return False
         context._initial_sent = True
+        if last is None or now - last < _HOLD_AFTER or len(data) >= _HOLD_MAX:
+            return await self._send_now(call, data)
         call.waiting = data
         if not call.pending:
             call.pending = True
@@ -828,6 +855,16 @@ class Server(_Codec, _Methods, aio.Server):
                 self._flush_scheduled = True
                 self._loop.call_soon(self._flush)  # type: ignore[union-attr]
         return True
+
+    async def _send_now(self, call: _Call, data: bytes) -> bool:
+        sent = self._front._stream_send_or_park(call.call_id, data)  # type: ignore[union-attr]
+        if sent != _STREAM_PARKED:
+            return sent != STREAM_CLOSED
+        call.writable = self._loop.create_future()  # type: ignore[union-attr]
+        try:
+            return await call.writable
+        finally:
+            call.writable = None
 
     def _send_waiting(self, call: _Call) -> None:
         data, call.waiting = call.waiting, None
