@@ -46,6 +46,14 @@ _LOGGER = logging.getLogger(__name__)
 
 _END = object()
 _EVENTS_PER_POLL = 64
+# A small stream message written at least this long after the call's previous
+# one came from a handler that waited for something, usually along with other
+# handlers, so it is held for the end of the loop pass to go out with theirs.
+# Messages written closer together, and larger ones, which fill a write on
+# their own, go out right away.
+_HOLD_AFTER = 0.001
+_HOLD_MAX = 16 * 1024
+_monotonic = time.monotonic
 
 # grpcio's aio server sends an int from 0 to 15 as that status code.
 _INT_CODES = {c.value[0]: c for c in grpc.StatusCode if c.value[0] < 16}
@@ -86,6 +94,13 @@ class _Call:
         self.done = False
         self.callbacks: list[Callable[[Any], None]] = []
         self.writable: asyncio.Future[bool] | None = None
+        # The message waiting for Server._flush, whether the call is in
+        # Server._pending, and when the call last wrote a message.
+        self.waiting: bytes | None = None
+        self.pending = False
+        self.last_write: float | None = None
+        # The client is gone.
+        self.closed = False
 
     def cancel(self) -> None:
         self.cancelled = True
@@ -405,6 +420,10 @@ class Server(_Codec, _Methods, aio.Server):
         self._table: list[tuple[str, grpc.RpcMethodHandler | None, bool]] = []
         self._resolved: dict[str, int | None] = {}
         self._calls: dict[int, _Call] = {}
+        # Stream messages written during one pass of the event loop, handed
+        # to the front together so they go out in as few writes as possible.
+        self._pending: list[_Call] = []
+        self._flush_scheduled = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._started = False
         self._stopping = False
@@ -611,11 +630,7 @@ class Server(_Codec, _Methods, aio.Server):
             ) and not await self._intercept(call):
                 return
             if not call.admitted:
-                self._front.fail(  # type: ignore[union-attr]
-                    call.call_id,
-                    _code(grpc.StatusCode.RESOURCE_EXHAUSTED),
-                    _LIMIT_EXCEEDED,
-                )
+                self._end(call, grpc.StatusCode.RESOURCE_EXHAUSTED, _LIMIT_EXCEEDED)
                 return
             ok, request = self._request(call, payload)
             if not ok:
@@ -627,9 +642,7 @@ class Server(_Codec, _Methods, aio.Server):
         except asyncio.CancelledError:
             # Only an RPC the handler cancelled itself still has a client.
             if not call.cancelled and not self._stopping:
-                self._front.fail(  # type: ignore[union-attr]
-                    call.call_id, _code(grpc.StatusCode.CANCELLED), "Cancelled"
-                )
+                self._end(call, grpc.StatusCode.CANCELLED, "Cancelled")
         finally:
             self._calls.pop(call.call_id, None)
             call.finish(context)
@@ -656,11 +669,7 @@ class Server(_Codec, _Methods, aio.Server):
             handler = await intercept_at(0, details)
         except Exception as exc:
             _LOGGER.exception("Unexpected error in interceptor: %s", exc)
-            front.fail(
-                call.call_id,
-                _code(grpc.StatusCode.UNKNOWN),
-                f"Unexpected {type(exc)}: {exc}",
-            )
+            self._end(call, grpc.StatusCode.UNKNOWN, f"Unexpected {type(exc)}: {exc}")
             return False
         return _use_handler(front, call, handler)
 
@@ -670,12 +679,30 @@ class Server(_Codec, _Methods, aio.Server):
             code = grpc.StatusCode.UNKNOWN
         if details is None:
             details = context._details or ""
-        self._front.fail(  # type: ignore[union-attr]
-            call.call_id,
-            _code(code),
-            details,
-            trailing_metadata=list(context._trailing_metadata),
-        )
+        self._end(call, code, details, context._trailing_metadata)
+
+    def _end(
+        self,
+        call: _Call,
+        code: grpc.StatusCode = grpc.StatusCode.OK,
+        details: str = "",
+        trailing_metadata: Sequence[tuple[str, str | bytes]] = (),
+    ) -> None:
+        """Ends a call. A message the call still holds goes out first, so
+        calls should always end here rather than on the front directly."""
+        if call.waiting is not None:
+            self._send_waiting(call)
+        front = self._front
+        assert front is not None
+        if code == grpc.StatusCode.OK:
+            front.stream_end(call.call_id, trailing_metadata=list(trailing_metadata))
+        else:
+            front.fail(
+                call.call_id,
+                _code(code),
+                details,
+                trailing_metadata=list(trailing_metadata),
+            )
 
     def _failed(self, call: _Call, context: _Context, exc: Exception) -> None:
         if isinstance(exc, aio.AbortError):
@@ -727,9 +754,7 @@ class Server(_Codec, _Methods, aio.Server):
             # A unary handler from an interceptor answers with one message.
             ok, response = await self._unary_response(call, context, request)
             if ok and await self._send(call, context, response):
-                self._front.stream_end(  # type: ignore[union-attr]
-                    call.call_id, trailing_metadata=list(context._trailing_metadata)
-                )
+                self._end(call, trailing_metadata=context._trailing_metadata)
             return
         handler = call.handler.unary_stream
         try:
@@ -753,9 +778,7 @@ class Server(_Codec, _Methods, aio.Server):
         if context._code not in (None, grpc.StatusCode.OK):
             self._fail(call, context, None)
         else:
-            self._front.stream_end(  # type: ignore[union-attr]
-                call.call_id, trailing_metadata=list(context._trailing_metadata)
-            )
+            self._end(call, trailing_metadata=context._trailing_metadata)
 
     async def _iterate(
         self, call: _Call, context: _Context, handler: Any, request: Any
@@ -787,23 +810,97 @@ class Server(_Codec, _Methods, aio.Server):
         except Exception as exc:
             self._failed(call, context, exc)
             return None
-        return self._within_send_limit(call, data)
+        limit = self._send_limit
+        if limit is not None and len(data) > limit:
+            # Through _end(), so a message the call holds goes out first.
+            self._end(
+                call,
+                grpc.StatusCode.RESOURCE_EXHAUSTED,
+                f"SERVER: Sent message larger than max ({len(data)} vs. {limit})",
+            )
+            return None
+        return data
 
     async def _send(self, call: _Call, context: _Context, response: Any) -> bool:
-        front = self._front
-        assert front is not None
-        data = self._encode(call, context, response)
-        if data is None:
+        # _encode() inlined: this runs for every message of every stream.
+        try:
+            data = _to_bytes(call.handler.response_serializer, response)
+        except Exception as exc:
+            self._failed(call, context, exc)
             return False
-        context._initial_sent = True
-        sent = front._stream_send_or_park(call.call_id, data)
-        if sent == _STREAM_PARKED:
-            call.writable = asyncio.get_running_loop().create_future()
+        limit = self._send_limit
+        if limit is not None and len(data) > limit:
+            self._end(
+                call,
+                grpc.StatusCode.RESOURCE_EXHAUSTED,
+                f"SERVER: Sent message larger than max ({len(data)} vs. {limit})",
+            )
+            return False
+        now = _monotonic()
+        last, call.last_write = call.last_write, now
+        if call.waiting is None and call.writable is None:
+            if last is None or now - last < _HOLD_AFTER or len(data) >= _HOLD_MAX:
+                # Nothing of this call is held or waiting for room, and the
+                # message isn't one to hold: send it now. Handlers that send
+                # back to back take this path, so it stays as short as it can.
+                context._initial_sent = True
+                sent = self._front._stream_send_or_park(call.call_id, data)  # type: ignore[union-attr]
+                if sent != _STREAM_PARKED:
+                    return sent != STREAM_CLOSED
+                call.writable = self._loop.create_future()  # type: ignore[union-attr]
+                try:
+                    return await call.writable
+                finally:
+                    call.writable = None
+        elif call.waiting is not None:
+            # At most one message of a call waits, so a call's messages
+            # can't pass each other when one of them has to wait for room.
+            self._send_waiting(call)
+        if call.writable is not None:
             try:
-                return await call.writable
+                if not await call.writable:
+                    call.closed = True
             finally:
                 call.writable = None
-        return sent != STREAM_CLOSED
+        if call.closed:
+            return False
+        context._initial_sent = True
+        if last is None or now - last < _HOLD_AFTER or len(data) >= _HOLD_MAX:
+            return await self._send_now(call, data)
+        call.waiting = data
+        if not call.pending:
+            call.pending = True
+            self._pending.append(call)
+            if not self._flush_scheduled:
+                self._flush_scheduled = True
+                self._loop.call_soon(self._flush)  # type: ignore[union-attr]
+        return True
+
+    async def _send_now(self, call: _Call, data: bytes) -> bool:
+        sent = self._front._stream_send_or_park(call.call_id, data)  # type: ignore[union-attr]
+        if sent != _STREAM_PARKED:
+            return sent != STREAM_CLOSED
+        call.writable = self._loop.create_future()  # type: ignore[union-attr]
+        try:
+            return await call.writable
+        finally:
+            call.writable = None
+
+    def _send_waiting(self, call: _Call) -> None:
+        data, call.waiting = call.waiting, None
+        sent = self._front._stream_send_or_park(call.call_id, data)  # type: ignore[union-attr]
+        if sent == _STREAM_PARKED:
+            call.writable = self._loop.create_future()  # type: ignore[union-attr]
+        elif sent == STREAM_CLOSED:
+            call.closed = True
+
+    def _flush(self) -> None:
+        self._flush_scheduled = False
+        pending, self._pending = self._pending, []
+        for call in pending:
+            call.pending = False
+            if call.waiting is not None:
+                self._send_waiting(call)
 
 
 def server(

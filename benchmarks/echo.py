@@ -9,7 +9,10 @@ low-level API.
 
 DUR sets the seconds measured (default 5), SIZE the payload bytes
 (default 64), METHOD the rpc type (unary or stream, default unary),
-and STREAM_COUNT the messages per stream (default 10).
+STREAM_COUNT the messages per stream (default 10), and ITL_MS makes
+streaming handlers send each message on the next tick of a clock with
+that period, like an LLM engine that emits a token for every running
+request at each decode step (default 0, no wait).
 METRICS=1 turns on the native front's metrics.
 """
 
@@ -32,6 +35,7 @@ STREAM_COUNT = int(os.environ.get("STREAM_COUNT", "10"))
 if STREAM_COUNT < 1:
     print("STREAM_COUNT must be at least 1", file=sys.stderr)
     sys.exit(1)
+ITL = float(os.environ.get("ITL_MS", "0")) / 1000
 METHOD_NAME = "Stream" if METHOD_TYPE == "stream" else "Unary"
 METHOD = f"/bench.Echo/{METHOD_NAME}"
 
@@ -63,6 +67,8 @@ def serve(kind: str, port: int) -> None:
 
             async def server_stream(req: bytes, ctx: object):
                 for _ in range(STREAM_COUNT):
+                    if ITL:
+                        await asyncio.sleep(ITL - time.time() % ITL)
                     yield req
 
             if kind == "aio":
@@ -93,6 +99,8 @@ def serve(kind: str, port: int) -> None:
 
     def server_stream(req: bytes, ctx: object):
         for _ in range(STREAM_COUNT):
+            if ITL:
+                time.sleep(ITL - time.time() % ITL)
             yield req
 
     if kind == "sync":
@@ -158,6 +166,16 @@ def client(port: int, threads: int, out: mp.Queue, ready: mp.Queue) -> None:
     os._exit(0)
 
 
+def cpu_seconds(pid: int) -> float | None:
+    # Linux only; elsewhere the server's CPU isn't reported.
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            fields = f.read().rsplit(")", 1)[1].split()
+    except OSError:
+        return None
+    return (int(fields[11]) + int(fields[12])) / os.sysconf("SC_CLK_TCK")
+
+
 def main() -> None:
     kind, procs, threads = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
     if kind == "native" and METHOD_NAME == "Stream":
@@ -178,17 +196,20 @@ def main() -> None:
         c.start()
     for _ in clients:
         ready.get(timeout=60)
+    cpu0, t0 = cpu_seconds(server.pid), time.perf_counter()
     results = [out.get(timeout=DUR + 60) for _ in clients]
+    cpu1, t1 = cpu_seconds(server.pid), time.perf_counter()
     server.kill()
     calls = sum(r[0] for r in results)
     rate = sum(r[0] / r[1] for r in results)
     cpu_us = 1e6 * sum(r[2] for r in results) / calls
     unit = "msgs/s" if METHOD_NAME == "Stream" else "calls/s"
     cpu_unit = "us/msg" if METHOD_NAME == "Stream" else "us/call"
-    print(
-        f"{kind:11s} {procs}x{threads}: {rate:9,.0f} {unit}  client CPU {cpu_us:6.1f} {cpu_unit}",
-        flush=True,
-    )
+    line = f"{kind:11s} {procs}x{threads}: {rate:9,.0f} {unit}  client CPU {cpu_us:6.1f} {cpu_unit}"
+    if cpu0 is not None and cpu1 is not None:
+        server_us = 1e6 * (cpu1 - cpu0) / (t1 - t0) / rate
+        line += f"  server CPU {server_us:6.1f} {cpu_unit}"
+    print(line, flush=True)
 
 
 if __name__ == "__main__":
