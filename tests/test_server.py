@@ -58,6 +58,7 @@ def _serve(
     kind: str,
     unary: Behavior | None = None,
     stream: Behavior | None = None,
+    host: str = "127.0.0.1",
     **kwargs: Any,
 ) -> tuple[grpc.Server, int]:
     t_pb2, t_pb2_grpc = pb
@@ -71,7 +72,7 @@ def _serve(
 
     server = SERVERS[kind](futures.ThreadPoolExecutor(8), **kwargs)
     t_pb2_grpc.add_SServicer_to_server(Servicer(), server)
-    port = server.add_insecure_port("127.0.0.1:0")
+    port = server.add_insecure_port(f"{host}:0")
     server.start()
     return server, port
 
@@ -98,13 +99,14 @@ def _unary(
     behavior: Behavior,
     request: str = "x",
     channel_options: list[tuple[str, Any]] | None = None,
+    host: str = "127.0.0.1",
     **kwargs: Any,
 ) -> Any:
     t_pb2, t_pb2_grpc = pb
-    server, port = _serve(pb, kind, unary=behavior, **kwargs)
+    server, port = _serve(pb, kind, unary=behavior, host=host, **kwargs)
     try:
         with grpc.insecure_channel(
-            f"127.0.0.1:{port}", options=channel_options
+            f"{host}:{port}", options=channel_options
         ) as channel:
             stub = t_pb2_grpc.SStub(channel)
             try:
@@ -299,6 +301,8 @@ def test_context_details(pb: tuple[Any, Any], kind: str) -> None:
         "security_level": [b"TSI_SECURITY_NONE"],
     }
     assert seen["identities"] is None and seen["code"] is None
+    assert _unary(pb, kind, look, host="[::1]")[0] == "OK"
+    assert seen["peer"].startswith("ipv6:%5B::1%5D:")
 
 
 def test_client_cancel_runs_callbacks(pb: tuple[Any, Any], kind: str) -> None:

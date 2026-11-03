@@ -69,7 +69,9 @@ async fn accept(listener: &Listener) -> std::io::Result<Accepted> {
             let (stream, addr) = listener.accept().await?;
             let peer = match addr {
                 std::net::SocketAddr::V4(addr) => format!("ipv4:{addr}"),
-                std::net::SocketAddr::V6(addr) => format!("ipv6:{addr}"),
+                std::net::SocketAddr::V6(addr) => {
+                    format!("ipv6:%5B{}%5D:{}", addr.ip(), addr.port())
+                }
             };
             Ok(Accepted::Tcp(stream, peer.into()))
         }

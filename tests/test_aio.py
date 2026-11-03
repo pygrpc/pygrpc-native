@@ -62,6 +62,7 @@ async def _serve(
     kind: str,
     unary: Behavior | None = None,
     stream: Behavior | None = None,
+    host: str = "127.0.0.1",
     **kwargs: Any,
 ) -> tuple[aio.Server, int]:
     a_pb2, a_pb2_grpc = pb
@@ -87,7 +88,7 @@ async def _serve(
 
     server = SERVERS[kind](**kwargs)
     a_pb2_grpc.add_SServicer_to_server(Servicer(), server)
-    port = server.add_insecure_port("127.0.0.1:0")
+    port = server.add_insecure_port(f"{host}:0")
     await server.start()
     return server, port
 
@@ -104,11 +105,16 @@ def _picked(metadata: Any) -> list[tuple[str, Any]]:
     return [(key, value) for key, value in metadata or () if key.startswith("x-")]
 
 
-async def _unary(pb: tuple[Any, Any], kind: str, behavior: Behavior) -> Any:
+async def _unary(
+    pb: tuple[Any, Any],
+    kind: str,
+    behavior: Behavior,
+    host: str = "127.0.0.1",
+) -> Any:
     a_pb2, a_pb2_grpc = pb
-    server, port = await _serve(pb, kind, unary=behavior)
+    server, port = await _serve(pb, kind, unary=behavior, host=host)
     try:
-        async with aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+        async with aio.insecure_channel(f"{host}:{port}") as channel:
             call = a_pb2_grpc.SStub(channel).Unary(
                 a_pb2.Msg(s="x"), timeout=5, metadata=[("x-in", "1")]
             )
@@ -451,6 +457,8 @@ def test_context_details(pb: tuple[Any, Any], kind: str) -> None:
         "security_level": [b"TSI_SECURITY_NONE"],
     }
     assert seen["code"] is None and seen["cancelled"] is False
+    assert asyncio.run(_unary(pb, kind, look, host="[::1]"))[0] == "OK"
+    assert seen["peer"].startswith("ipv6:%5B::1%5D:")
 
 
 def test_stop_with_grace(pb: tuple[Any, Any], kind: str) -> None:
