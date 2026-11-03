@@ -653,6 +653,40 @@ def test_client_leaving_a_blocked_stream_cancels_the_handler(
     asyncio.run(run())
 
 
+def test_cancelling_blocked_streams_keeps_serving(pb: tuple[Any, Any]) -> None:
+    a_pb2, a_pb2_grpc = pb
+    chunk = "x" * (1 << 20)
+
+    async def endless(request: Any, context: aio.ServicerContext) -> AsyncIterator[Any]:
+        while True:
+            yield a_pb2.Msg(s=chunk)
+
+    async def run() -> list[Any]:
+        errors: list[Any] = []
+        asyncio.get_running_loop().set_exception_handler(
+            lambda loop, context: errors.append(context)
+        )
+        server, port = await _serve(pb, "native", stream=endless)
+        try:
+            async with aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+                stub = a_pb2_grpc.SStub(channel)
+                calls = [stub.Stream(a_pb2.Msg(), timeout=10) for _ in range(16)]
+                for call in calls:
+                    await call.read()
+                # Let the unread writes back up, then leave them all at once,
+                # so the cancels and the parked writes' events come together.
+                await asyncio.sleep(0.3)
+                for call in calls:
+                    call.cancel()
+                await asyncio.sleep(0.3)
+                await stub.Unary(a_pb2.Msg(s="still"), timeout=5)
+        finally:
+            await server.stop(None)
+        return errors
+
+    assert asyncio.run(run()) == []
+
+
 def test_sync_handlers_get_grpcio_sync_context() -> None:
     """Handlers that aren't coroutines get grpcio's sync context: abort()
     returns, and the call ends with its status once the handler does."""
