@@ -568,7 +568,12 @@ class Server(_Codec, _Methods, aio.Server):
                 continue
             if kind == _EVENT_WRITABLE:
                 call = self._calls.get(call_id)
-                if call is not None and call.writable is not None:
+                # A cancel earlier in the batch may have cancelled the wait.
+                if (
+                    call is not None
+                    and call.writable is not None
+                    and not call.writable.done()
+                ):
                     call.writable.set_result(payload)
                 continue
             if kind == _EVENT_RESOLVE:
