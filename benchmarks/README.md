@@ -13,10 +13,15 @@ The kinds are `sync` and `aio` for grpcio's servers, `native-sync` and
 and `native` for the low-level API. `DUR` (default 5) and `SIZE` (default 64)
 change the seconds measured and the payload bytes.
 `METHOD` (unary or stream) and `STREAM_COUNT` (default 10) configure the
-streaming benchmark. The server and the clients share the machine.
+streaming benchmark. With `ITL_MS`, handlers send each message on the next
+tick of a clock with that period, the way an LLM engine emits one token for
+every running request at each decode step. The server and the clients share
+the machine. On Linux the server's CPU per call or message is printed too.
 
 ```bash
 METHOD=stream python benchmarks/echo.py native-aio 8 4
+# 1024 streams, each sending a message every 20 ms, all on the same tick
+METHOD=stream ITL_MS=20 STREAM_COUNT=128 SIZE=24 python benchmarks/echo.py native-aio 8 128
 ```
 
 Median of three runs, calls/s with the client CPU per call in brackets.
