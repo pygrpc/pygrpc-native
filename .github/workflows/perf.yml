@@ -1,7 +1,8 @@
 name: Perf
 
 # Compares a change with its base on the same runner. Advisory: the job passes
-# and the results go to the job summary.
+# and the results go to the job summary, and perf-comment.yml posts them on
+# the pull request.
 
 on:
   pull_request:
@@ -69,8 +70,16 @@ jobs:
           python head/benchmarks/regress.py \
             --base venv-base/bin/python --head venv-head/bin/python \
             --json results.json --summary "$GITHUB_STEP_SUMMARY"
+      - name: Note the pull request
+        if: github.event_name == 'pull_request'
+        env:
+          PR: ${{ github.event.pull_request.number }}
+          BASE: ${{ steps.base.outputs.ref }}
+        run: echo "{\"pr\": $PR, \"base\": \"$BASE\"}" > pr.json
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: perf-results
-          path: results.json
+          path: |
+            results.json
+            pr.json
