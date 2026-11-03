@@ -19,7 +19,6 @@ import glob
 import json
 import os
 import random
-import shutil
 import socket
 import statistics
 import subprocess
@@ -169,12 +168,6 @@ def _voluntary_switches(pid: int) -> int:
     return total
 
 
-def _pin(cores: str) -> list[str]:
-    if shutil.which("taskset") and (os.cpu_count() or 0) >= 4:
-        return ["taskset", "-c", cores]
-    return []
-
-
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -185,7 +178,7 @@ def measure(python: str, scenario: str) -> dict:
     kind, method, calls = SCENARIOS[scenario]
     port = _free_port()
     server = subprocess.Popen(
-        [*_pin("0,1"), python, __file__, "serve", kind, str(port)],
+        [python, __file__, "serve", kind, str(port)],
         stdout=subprocess.PIPE,
         text=True,
     )
@@ -196,7 +189,7 @@ def measure(python: str, scenario: str) -> dict:
             raise RuntimeError(f"{python}: server for {scenario} didn't start")
         clients = [
             subprocess.Popen(
-                [*_pin("2,3"), sys.executable, __file__, "client", method]
+                [sys.executable, __file__, "client", method]
                 + [str(port), str(calls), str(CLIENT_THREADS)],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
@@ -290,7 +283,6 @@ def _environment() -> dict:
     return {
         "cpu": model,
         "cpus": os.cpu_count(),
-        "pinned": bool(_pin("0")),
         "grpcio": grpc.__version__,
         "load": f"{CLIENT_PROCS} client processes x {CLIENT_THREADS} channels",
     }
