@@ -86,6 +86,12 @@ class _Call:
         self.done = False
         self.callbacks: list[Callable[[Any], None]] = []
         self.writable: asyncio.Future[bool] | None = None
+        # The message waiting for Server._flush, and whether the call is in
+        # Server._pending.
+        self.waiting: bytes | None = None
+        self.pending = False
+        # The client is gone.
+        self.closed = False
 
     def cancel(self) -> None:
         self.cancelled = True
@@ -405,6 +411,10 @@ class Server(_Codec, _Methods, aio.Server):
         self._table: list[tuple[str, grpc.RpcMethodHandler | None, bool]] = []
         self._resolved: dict[str, int | None] = {}
         self._calls: dict[int, _Call] = {}
+        # Stream messages written during one pass of the event loop, handed
+        # to the front together so they go out in as few writes as possible.
+        self._pending: list[_Call] = []
+        self._flush_scheduled = False
         self._loop: asyncio.AbstractEventLoop | None = None
         self._started = False
         self._stopping = False
@@ -627,6 +637,8 @@ class Server(_Codec, _Methods, aio.Server):
         except asyncio.CancelledError:
             # Only an RPC the handler cancelled itself still has a client.
             if not call.cancelled and not self._stopping:
+                if call.waiting is not None:
+                    self._send_waiting(call)
                 self._front.fail(  # type: ignore[union-attr]
                     call.call_id, _code(grpc.StatusCode.CANCELLED), "Cancelled"
                 )
@@ -670,6 +682,8 @@ class Server(_Codec, _Methods, aio.Server):
             code = grpc.StatusCode.UNKNOWN
         if details is None:
             details = context._details or ""
+        if call.waiting is not None:
+            self._send_waiting(call)
         self._front.fail(  # type: ignore[union-attr]
             call.call_id,
             _code(code),
@@ -727,6 +741,8 @@ class Server(_Codec, _Methods, aio.Server):
             # A unary handler from an interceptor answers with one message.
             ok, response = await self._unary_response(call, context, request)
             if ok and await self._send(call, context, response):
+                if call.waiting is not None:
+                    self._send_waiting(call)
                 self._front.stream_end(  # type: ignore[union-attr]
                     call.call_id, trailing_metadata=list(context._trailing_metadata)
                 )
@@ -753,6 +769,8 @@ class Server(_Codec, _Methods, aio.Server):
         if context._code not in (None, grpc.StatusCode.OK):
             self._fail(call, context, None)
         else:
+            if call.waiting is not None:
+                self._send_waiting(call)
             self._front.stream_end(  # type: ignore[union-attr]
                 call.call_id, trailing_metadata=list(context._trailing_metadata)
             )
@@ -790,20 +808,46 @@ class Server(_Codec, _Methods, aio.Server):
         return self._within_send_limit(call, data)
 
     async def _send(self, call: _Call, context: _Context, response: Any) -> bool:
-        front = self._front
-        assert front is not None
         data = self._encode(call, context, response)
         if data is None:
             return False
-        context._initial_sent = True
-        sent = front._stream_send_or_park(call.call_id, data)
-        if sent == _STREAM_PARKED:
-            call.writable = asyncio.get_running_loop().create_future()
+        if call.waiting is not None:
+            # At most one message of a call waits, so a call's messages
+            # can't pass each other when one of them has to wait for room.
+            self._send_waiting(call)
+        if call.writable is not None:
             try:
-                return await call.writable
+                if not await call.writable:
+                    call.closed = True
             finally:
                 call.writable = None
-        return sent != STREAM_CLOSED
+        if call.closed:
+            return False
+        context._initial_sent = True
+        call.waiting = data
+        if not call.pending:
+            call.pending = True
+            self._pending.append(call)
+            if not self._flush_scheduled:
+                self._flush_scheduled = True
+                self._loop.call_soon(self._flush)  # type: ignore[union-attr]
+        return True
+
+    def _send_waiting(self, call: _Call) -> None:
+        data, call.waiting = call.waiting, None
+        sent = self._front._stream_send_or_park(call.call_id, data)  # type: ignore[union-attr]
+        if sent == _STREAM_PARKED:
+            call.writable = self._loop.create_future()  # type: ignore[union-attr]
+        elif sent == STREAM_CLOSED:
+            call.closed = True
+
+    def _flush(self) -> None:
+        self._flush_scheduled = False
+        pending, self._pending = self._pending, []
+        for call in pending:
+            call.pending = False
+            if call.waiting is not None:
+                self._send_waiting(call)
 
 
 def server(
