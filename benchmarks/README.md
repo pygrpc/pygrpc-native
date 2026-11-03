@@ -45,3 +45,16 @@ The clients are grpcio in every row, so at 1x1 they cost about the same
 whichever server they call. With pygrpc-native at 4x4 and 8x4 the clients make
 several times more calls on the same cores, which is why their CPU per call
 goes up.
+
+## Comparing two builds
+
+`regress.py` compares the server cost per call of two builds on the same
+machine. The `Perf` workflow runs it on pull requests, and it can be run by
+hand against another ref, such as the last release.
+
+```bash
+python benchmarks/regress.py --base base-venv/bin/python --head head-venv/bin/python
+```
+
+Each interpreter needs its build of pygrpc-native installed, and the one
+running the script needs grpcio. It runs on Linux only.
