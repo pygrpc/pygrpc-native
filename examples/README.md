@@ -28,3 +28,24 @@ python -m examples.client
 
 The client prints `Hello, world!`. Stop the server with Ctrl-C before starting
 the other one; both listen on `127.0.0.1:50051`.
+
+## Health checking example
+
+The `health_server` example demonstrates that gRPC health checking (from
+`grpcio-health-checking`) runs natively with `pygrpc_native.server()`.
+
+Install the extra dependency:
+
+```bash
+pip install grpcio-health-checking
+```
+
+Then start the server:
+
+```bash
+python -m examples.health_server
+```
+
+It registers a `HealthServicer`, sets the default service to `SERVING`, and
+listens on `127.0.0.1:50051`. You can call `Check` and `Watch` against it with
+a standard grpcio health client.

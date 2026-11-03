@@ -40,3 +40,24 @@ def test_aio_server_accepts_grpcio_client() -> None:
             await server.stop(None)
 
     asyncio.run(exercise())
+
+
+def test_health_server_check() -> None:
+    from grpc_health.v1 import health_pb2, health_pb2_grpc
+
+    from examples.health_server import make_server
+
+    server, port, health_servicer = make_server("127.0.0.1:0")
+    server.start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = health_pb2_grpc.HealthStub(channel)
+            # Initial Check should return SERVING
+            response = stub.Check(health_pb2.HealthCheckRequest(service=""), timeout=5)
+            assert response.status == health_pb2.HealthCheckResponse.SERVING
+            # Change to NOT_SERVING and Check again
+            health_servicer.set("", health_pb2.HealthCheckResponse.NOT_SERVING)
+            response = stub.Check(health_pb2.HealthCheckRequest(service=""), timeout=5)
+            assert response.status == health_pb2.HealthCheckResponse.NOT_SERVING
+    finally:
+        server.stop(None)
