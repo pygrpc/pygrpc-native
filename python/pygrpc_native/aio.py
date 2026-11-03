@@ -621,11 +621,7 @@ class Server(_Codec, _Methods, aio.Server):
             ) and not await self._intercept(call):
                 return
             if not call.admitted:
-                self._front.fail(  # type: ignore[union-attr]
-                    call.call_id,
-                    _code(grpc.StatusCode.RESOURCE_EXHAUSTED),
-                    _LIMIT_EXCEEDED,
-                )
+                self._end(call, grpc.StatusCode.RESOURCE_EXHAUSTED, _LIMIT_EXCEEDED)
                 return
             ok, request = self._request(call, payload)
             if not ok:
@@ -637,11 +633,7 @@ class Server(_Codec, _Methods, aio.Server):
         except asyncio.CancelledError:
             # Only an RPC the handler cancelled itself still has a client.
             if not call.cancelled and not self._stopping:
-                if call.waiting is not None:
-                    self._send_waiting(call)
-                self._front.fail(  # type: ignore[union-attr]
-                    call.call_id, _code(grpc.StatusCode.CANCELLED), "Cancelled"
-                )
+                self._end(call, grpc.StatusCode.CANCELLED, "Cancelled")
         finally:
             self._calls.pop(call.call_id, None)
             call.finish(context)
@@ -668,11 +660,7 @@ class Server(_Codec, _Methods, aio.Server):
             handler = await intercept_at(0, details)
         except Exception as exc:
             _LOGGER.exception("Unexpected error in interceptor: %s", exc)
-            front.fail(
-                call.call_id,
-                _code(grpc.StatusCode.UNKNOWN),
-                f"Unexpected {type(exc)}: {exc}",
-            )
+            self._end(call, grpc.StatusCode.UNKNOWN, f"Unexpected {type(exc)}: {exc}")
             return False
         return _use_handler(front, call, handler)
 
@@ -682,14 +670,30 @@ class Server(_Codec, _Methods, aio.Server):
             code = grpc.StatusCode.UNKNOWN
         if details is None:
             details = context._details or ""
+        self._end(call, code, details, context._trailing_metadata)
+
+    def _end(
+        self,
+        call: _Call,
+        code: grpc.StatusCode = grpc.StatusCode.OK,
+        details: str = "",
+        trailing_metadata: Sequence[tuple[str, str | bytes]] = (),
+    ) -> None:
+        """Ends a call. A message the call still holds goes out first, so
+        calls should always end here rather than on the front directly."""
         if call.waiting is not None:
             self._send_waiting(call)
-        self._front.fail(  # type: ignore[union-attr]
-            call.call_id,
-            _code(code),
-            details,
-            trailing_metadata=list(context._trailing_metadata),
-        )
+        front = self._front
+        assert front is not None
+        if code == grpc.StatusCode.OK:
+            front.stream_end(call.call_id, trailing_metadata=list(trailing_metadata))
+        else:
+            front.fail(
+                call.call_id,
+                _code(code),
+                details,
+                trailing_metadata=list(trailing_metadata),
+            )
 
     def _failed(self, call: _Call, context: _Context, exc: Exception) -> None:
         if isinstance(exc, aio.AbortError):
@@ -741,11 +745,7 @@ class Server(_Codec, _Methods, aio.Server):
             # A unary handler from an interceptor answers with one message.
             ok, response = await self._unary_response(call, context, request)
             if ok and await self._send(call, context, response):
-                if call.waiting is not None:
-                    self._send_waiting(call)
-                self._front.stream_end(  # type: ignore[union-attr]
-                    call.call_id, trailing_metadata=list(context._trailing_metadata)
-                )
+                self._end(call, trailing_metadata=context._trailing_metadata)
             return
         handler = call.handler.unary_stream
         try:
@@ -769,11 +769,7 @@ class Server(_Codec, _Methods, aio.Server):
         if context._code not in (None, grpc.StatusCode.OK):
             self._fail(call, context, None)
         else:
-            if call.waiting is not None:
-                self._send_waiting(call)
-            self._front.stream_end(  # type: ignore[union-attr]
-                call.call_id, trailing_metadata=list(context._trailing_metadata)
-            )
+            self._end(call, trailing_metadata=context._trailing_metadata)
 
     async def _iterate(
         self, call: _Call, context: _Context, handler: Any, request: Any
