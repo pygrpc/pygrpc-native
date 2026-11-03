@@ -401,6 +401,16 @@ def test_stream_with_invalid_metadata_fails(
     )
 
 
+def test_ascii_bytes_on_a_text_key_go_out_as_text(
+    pb: tuple[Any, Any], kind: str
+) -> None:
+    def trailing(request: Any, context: grpc.ServicerContext) -> Any:
+        context.set_trailing_metadata((("x-bytes", b"abc"),))
+        return request
+
+    assert _unary(pb, kind, trailing) == ("OK", "x", [], [("x-bytes", "abc")])
+
+
 def test_lifecycle(pb: tuple[Any, Any]) -> None:
     server, port = _serve(pb, "native")
     assert isinstance(server, grpc.Server) and port > 0

@@ -910,6 +910,17 @@ def test_stream_with_invalid_metadata_fails(
     )
 
 
+def test_ascii_bytes_on_a_text_key_go_out_as_text(
+    pb: tuple[Any, Any], kind: str
+) -> None:
+    async def trailing(request: Any, context: aio.ServicerContext) -> Any:
+        context.set_trailing_metadata((("x-bytes", b"abc"),))
+        return request
+
+    outcome = asyncio.run(_unary(pb, kind, trailing))
+    assert outcome == ("OK", "x", [], [("x-bytes", "abc")])
+
+
 def _echo_server() -> tuple[pygrpc_native.aio.Server, int]:
     async def echo(request: bytes, context: aio.ServicerContext) -> bytes:
         return request

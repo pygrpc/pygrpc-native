@@ -97,7 +97,7 @@ def test_stream_end_with_trailing_metadata() -> None:
         [("grpc-foo", "x")],
         [(":path", "x")],
         [("X-Upper", "x")],
-        [("x-text", b"bytes")],
+        [("x-text", b"\xff")],
         [("x-bin", "text")],
         [("x-bad", "line\nbreak")],
     ],

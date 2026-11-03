@@ -735,8 +735,17 @@ fn metadata_map(items: Vec<(String, Bound<'_, PyAny>)>) -> PyResult<MetadataMap>
             metadata.append_bin(key, BinaryMetadataValue::from_bytes(value));
         } else {
             let key = AsciiMetadataKey::from_bytes(key.as_bytes()).map_err(|_| invalid())?;
-            let value: &str = value.extract().map_err(|_| invalid())?;
-            let value = AsciiMetadataValue::try_from(value).map_err(|_| invalid())?;
+            let value = match value.extract::<&str>() {
+                Ok(text) => AsciiMetadataValue::try_from(text).map_err(|_| invalid())?,
+                // grpcio also takes ASCII bytes here and sends them as text.
+                Err(_) => {
+                    let raw: &[u8] = value.extract().map_err(|_| invalid())?;
+                    if !raw.is_ascii() {
+                        return Err(invalid());
+                    }
+                    AsciiMetadataValue::try_from(raw).map_err(|_| invalid())?
+                }
+            };
             metadata.append(key, value);
         }
     }
