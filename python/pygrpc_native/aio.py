@@ -26,6 +26,7 @@ from pygrpc_native._server import (
     _LIMIT_EXCEEDED,
     _NO_DEADLINE,
     _Codec,
+    _answer,
     _code,
     _behavior,
     _ConcurrencyLimit,
@@ -695,13 +696,19 @@ class Server(_Codec, _Methods, aio.Server):
         front = self._front
         assert front is not None
         if code == grpc.StatusCode.OK:
-            front.stream_end(call.call_id, trailing_metadata=list(trailing_metadata))
+            _answer(
+                lambda: front.stream_end(
+                    call.call_id, trailing_metadata=list(trailing_metadata)
+                )
+            )
         else:
-            front.fail(
-                call.call_id,
-                _code(code),
-                details,
-                trailing_metadata=list(trailing_metadata),
+            _answer(
+                lambda: front.fail(
+                    call.call_id,
+                    _code(code),
+                    details,
+                    trailing_metadata=list(trailing_metadata),
+                )
             )
 
     def _failed(self, call: _Call, context: _Context, exc: Exception) -> None:
@@ -740,13 +747,17 @@ class Server(_Codec, _Methods, aio.Server):
             return
         data = self._encode(call, context, response)
         if data is not None:
-            self._front.respond(  # type: ignore[union-attr]
-                call.call_id,
-                data,
-                initial_metadata=None
-                if context._initial_metadata is None
-                else list(context._initial_metadata),
-                trailing_metadata=list(context._trailing_metadata),
+            front = self._front
+            assert front is not None
+            _answer(
+                lambda: front.respond(
+                    call.call_id,
+                    data,
+                    initial_metadata=None
+                    if context._initial_metadata is None
+                    else list(context._initial_metadata),
+                    trailing_metadata=list(context._trailing_metadata),
+                )
             )
 
     async def _run_stream(self, call: _Call, context: _Context, request: Any) -> None:

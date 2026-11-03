@@ -97,7 +97,7 @@ def test_stream_end_with_trailing_metadata() -> None:
         [("grpc-foo", "x")],
         [(":path", "x")],
         [("X-Upper", "x")],
-        [("x-text", b"bytes")],
+        [("x-text", b"\xff")],
         [("x-bin", "text")],
         [("x-bad", "line\nbreak")],
     ],
@@ -109,3 +109,23 @@ def test_invalid_metadata_is_rejected(metadata: list[tuple[str, object]]) -> Non
             front.respond(1, b"", trailing_metadata=metadata)  # type: ignore[arg-type]
     finally:
         front.close()
+
+
+def test_invalid_metadata_still_ends_the_call() -> None:
+    errors: list[ValueError] = []
+
+    def answer(front: NativeGrpcFront, call_id: int, payload: bytes) -> None:
+        try:
+            front.respond(call_id, payload, trailing_metadata=[("X-Upper", "x")])
+        except ValueError as exc:
+            errors.append(exc)
+
+    with serving(answer) as channel:
+        with pytest.raises(grpc.RpcError) as info:
+            channel.unary_unary("/t.S/M")(b"x", timeout=5)
+    error = cast(grpc.Call, info.value)
+    assert (error.code(), error.details()) == (
+        grpc.StatusCode.INTERNAL,
+        "Invalid metadata",
+    )
+    assert len(errors) == 1

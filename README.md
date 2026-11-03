@@ -142,6 +142,10 @@ As in grpcio, a value that isn't an integer is ignored.
 - If a client doesn't answer a keepalive ping, the connection is closed after
   `grpc.keepalive_timeout_ms`, as gRPC's keepalive docs describe. grpcio waits
   for `grpc.http2.ping_timeout_ms` instead, which is a minute by default.
+- Response metadata keys starting with `grpc-` are reserved by gRPC, so a
+  call that sets one ends with `INTERNAL`. grpcio sends them.
+- A response metadata value with non-ASCII text on a key without `-bin` is
+  sent as is. grpcio ends that call with `INTERNAL`.
 
 </details>
 

@@ -426,10 +426,14 @@ impl NativeGrpcFront {
     ) -> PyResult<bool> {
         let answer = Answer {
             payload: Bytes::from_owner(payload),
-            initial_metadata: initial_metadata.map(metadata_map).transpose()?,
+            initial_metadata: initial_metadata
+                .map(metadata_map)
+                .transpose()
+                .map_err(|err| self.reject_metadata(call_id, err))?,
             trailing_metadata: trailing_metadata
                 .map(|items| metadata_map(items).map(MetadataMap::into_headers))
-                .transpose()?,
+                .transpose()
+                .map_err(|err| self.reject_metadata(call_id, err))?,
         };
         Ok(self.shared.respond(call_id, Ok(answer)))
     }
@@ -458,21 +462,19 @@ impl NativeGrpcFront {
         // grpcio's abort_with_status() sends the rich status this way.
         let details = match items.iter().position(|(key, _)| key == STATUS_DETAILS_KEY) {
             Some(i) => {
-                let value: Vec<u8> = items.remove(i).1.extract()?;
+                let value: Vec<u8> = items
+                    .remove(i)
+                    .1
+                    .extract()
+                    .map_err(|err| self.reject_metadata(call_id, err))?;
                 Bytes::from(value)
             }
             None => Bytes::new(),
         };
-        let status = Status::with_details_and_metadata(
-            Code::from_i32(code),
-            message,
-            details,
-            metadata_map(items)?,
-        );
-        if self.shared.is_unary(call_id) {
-            return Ok(self.shared.respond(call_id, Err(status)));
-        }
-        Ok(self.shared.end_stream(call_id, Some(status)))
+        let metadata = metadata_map(items).map_err(|err| self.reject_metadata(call_id, err))?;
+        let status =
+            Status::with_details_and_metadata(Code::from_i32(code), message, details, metadata);
+        Ok(self.end_call(call_id, status))
     }
 
     /// Send one message of a server-streaming call.
@@ -532,9 +534,8 @@ impl NativeGrpcFront {
         call_id: u64,
         metadata: Vec<(String, Bound<'_, PyAny>)>,
     ) -> PyResult<bool> {
-        Ok(self
-            .shared
-            .send_initial_metadata(call_id, metadata_map(metadata)?))
+        let metadata = metadata_map(metadata).map_err(|err| self.reject_metadata(call_id, err))?;
+        Ok(self.shared.send_initial_metadata(call_id, metadata))
     }
 
     /// Finish a server-streaming call with an OK status.
@@ -546,7 +547,8 @@ impl NativeGrpcFront {
     ) -> PyResult<()> {
         let status = trailing_metadata
             .map(|items| metadata_map(items).map(|md| Status::with_metadata(Code::Ok, "", md)))
-            .transpose()?;
+            .transpose()
+            .map_err(|err| self.reject_metadata(call_id, err))?;
         self.shared.end_stream(call_id, status);
         Ok(())
     }
@@ -636,6 +638,20 @@ impl NativeGrpcFront {
             let _ = std::fs::remove_file(path);
         }
     }
+
+    fn end_call(&self, call_id: u64, status: Status) -> bool {
+        if self.shared.is_unary(call_id) {
+            return self.shared.respond(call_id, Err(status));
+        }
+        self.shared.end_stream(call_id, Some(status))
+    }
+
+    /// Ends the call as grpcio does when it can't send the metadata, so the
+    /// client isn't left waiting, and hands the error back to the caller.
+    fn reject_metadata(&self, call_id: u64, err: PyErr) -> PyErr {
+        self.end_call(call_id, Status::internal("Invalid metadata"));
+        err
+    }
 }
 
 impl Drop for NativeGrpcFront {
@@ -719,8 +735,17 @@ fn metadata_map(items: Vec<(String, Bound<'_, PyAny>)>) -> PyResult<MetadataMap>
             metadata.append_bin(key, BinaryMetadataValue::from_bytes(value));
         } else {
             let key = AsciiMetadataKey::from_bytes(key.as_bytes()).map_err(|_| invalid())?;
-            let value: &str = value.extract().map_err(|_| invalid())?;
-            let value = AsciiMetadataValue::try_from(value).map_err(|_| invalid())?;
+            let value = match value.extract::<&str>() {
+                Ok(text) => AsciiMetadataValue::try_from(text).map_err(|_| invalid())?,
+                // grpcio also takes ASCII bytes here and sends them as text.
+                Err(_) => {
+                    let raw: &[u8] = value.extract().map_err(|_| invalid())?;
+                    if !raw.is_ascii() {
+                        return Err(invalid());
+                    }
+                    AsciiMetadataValue::try_from(raw).map_err(|_| invalid())?
+                }
+            };
             metadata.append(key, value);
         }
     }
