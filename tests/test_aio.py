@@ -461,6 +461,32 @@ def test_context_details(pb: tuple[Any, Any], kind: str) -> None:
     assert seen["peer"].startswith("ipv6:%5B::1%5D:")
 
 
+def test_initial_metadata_twice_is_rejected(pb: tuple[Any, Any], kind: str) -> None:
+    errors = []
+
+    async def twice(request: Any, context: aio.ServicerContext) -> Any:
+        await context.send_initial_metadata((("x-a", "1"),))
+        try:
+            await context.send_initial_metadata((("x-b", "2"),))
+        except aio.UsageError as exc:
+            errors.append(str(exc))
+        return request
+
+    assert asyncio.run(_unary(pb, kind, twice))[0] == "OK"
+    assert errors == ["Send initial metadata failed: already sent"]
+
+
+def test_start_on_a_running_or_stopped_server(pb: tuple[Any, Any], kind: str) -> None:
+    async def run() -> None:
+        server, _ = await _serve(pb, kind)
+        await server.start()
+        await server.stop(None)
+        with pytest.raises(aio.UsageError, match="Server not in ready state"):
+            await server.start()
+
+    asyncio.run(run())
+
+
 def test_stop_with_grace(pb: tuple[Any, Any], kind: str) -> None:
     a_pb2, a_pb2_grpc = pb
 

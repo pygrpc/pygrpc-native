@@ -144,7 +144,7 @@ class _Context(aio.ServicerContext):
         self, initial_metadata: Sequence[tuple[str, str | bytes]]
     ) -> None:
         if self._initial_sent:
-            raise ValueError("Initial metadata no longer allowed!")
+            raise aio.UsageError("Send initial metadata failed: already sent")
         self._initial_sent = True
         if self._call.streaming:
             front = self._server._front
@@ -465,8 +465,10 @@ class Server(_Codec, _Methods, aio.Server):
         raise NotImplementedError("TLS isn't supported yet")
 
     async def start(self) -> None:
+        if self._stopping:
+            raise aio.UsageError("Server not in ready state")
         if self._started:
-            raise ValueError("Cannot start already-started server!")
+            return
         if self._front is None:
             raise RuntimeError("add a port with add_insecure_port() before start()")
         self._started = True
