@@ -10,6 +10,7 @@ For every scenario, each round starts a fresh server per build, in random
 order, and records server CPU time and voluntary context switches per call
 over a fixed number of calls. A scenario regresses when the median head/base
 ratio is over its threshold and head is worse in all but at most one round.
+A change past half the threshold in that many rounds is reported as suspect.
 """
 
 import argparse
@@ -77,7 +78,9 @@ def serve(kind: str, port: int) -> None:
 
         async def main() -> None:
             server = pygrpc_native.aio.server()
-            server.add_generic_rpc_handlers([_handler(grpc, unary, stream)])
+            server.add_registered_method_handlers(
+                "bench.Echo", _handlers(grpc, unary, stream)
+            )
             server.add_insecure_port(target)
             await server.start()
             print("ready", flush=True)
@@ -96,21 +99,20 @@ def serve(kind: str, port: int) -> None:
             yield request
 
     server = pygrpc_native.server(ThreadPoolExecutor(8))
-    server.add_generic_rpc_handlers([_handler(grpc, sync_unary, sync_stream)])
+    server.add_registered_method_handlers(
+        "bench.Echo", _handlers(grpc, sync_unary, sync_stream)
+    )
     server.add_insecure_port(target)
     server.start()
     print("ready", flush=True)
     server.wait_for_termination()
 
 
-def _handler(grpc, unary, stream):
-    return grpc.method_handlers_generic_handler(
-        "bench.Echo",
-        {
-            "Unary": grpc.unary_unary_rpc_method_handler(unary),
-            "Stream": grpc.unary_stream_rpc_method_handler(stream),
-        },
-    )
+def _handlers(grpc, unary, stream):
+    return {
+        "Unary": grpc.unary_unary_rpc_method_handler(unary),
+        "Stream": grpc.unary_stream_rpc_method_handler(stream),
+    }
 
 
 def client(method: str, port: int, calls: int, threads: int) -> None:
