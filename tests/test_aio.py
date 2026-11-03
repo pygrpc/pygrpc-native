@@ -659,6 +659,41 @@ def test_streams_written_together_keep_their_order(pb: tuple[Any, Any]) -> None:
     assert asyncio.run(run()) == [expected] * 8
 
 
+def test_held_message_goes_out_before_a_failed_send(pb: tuple[Any, Any]) -> None:
+    a_pb2, a_pb2_grpc = pb
+
+    async def then_too_big(
+        request: Any, context: aio.ServicerContext
+    ) -> AsyncIterator[Any]:
+        yield a_pb2.Msg(s="0")
+        # Written after a pause, so it's held when the next one fails.
+        await asyncio.sleep(0.01)
+        yield a_pb2.Msg(s="1")
+        yield a_pb2.Msg(s="x" * 1000)
+
+    async def run() -> tuple[list[str], Any]:
+        server, port = await _serve(
+            pb,
+            "native",
+            stream=then_too_big,
+            options=[("grpc.max_send_message_length", 100)],
+        )
+        received = []
+        try:
+            async with aio.insecure_channel(f"127.0.0.1:{port}") as channel:
+                call = a_pb2_grpc.SStub(channel).Stream(a_pb2.Msg(), timeout=10)
+                try:
+                    async for message in call:
+                        received.append(message.s)
+                except aio.AioRpcError as e:
+                    return received, e.code()
+        finally:
+            await server.stop(None)
+        return received, None
+
+    assert asyncio.run(run()) == (["0", "1"], grpc.StatusCode.RESOURCE_EXHAUSTED)
+
+
 def test_client_leaving_a_blocked_stream_cancels_the_handler(
     pb: tuple[Any, Any], kind: str
 ) -> None:

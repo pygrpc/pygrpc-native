@@ -810,11 +810,31 @@ class Server(_Codec, _Methods, aio.Server):
         except Exception as exc:
             self._failed(call, context, exc)
             return None
-        return self._within_send_limit(call, data)
+        limit = self._send_limit
+        if limit is not None and len(data) > limit:
+            # Through _end(), so a message the call holds goes out first.
+            self._end(
+                call,
+                grpc.StatusCode.RESOURCE_EXHAUSTED,
+                f"SERVER: Sent message larger than max ({len(data)} vs. {limit})",
+            )
+            return None
+        return data
 
     async def _send(self, call: _Call, context: _Context, response: Any) -> bool:
-        data = self._encode(call, context, response)
-        if data is None:
+        # _encode() inlined: this runs for every message of every stream.
+        try:
+            data = _to_bytes(call.handler.response_serializer, response)
+        except Exception as exc:
+            self._failed(call, context, exc)
+            return False
+        limit = self._send_limit
+        if limit is not None and len(data) > limit:
+            self._end(
+                call,
+                grpc.StatusCode.RESOURCE_EXHAUSTED,
+                f"SERVER: Sent message larger than max ({len(data)} vs. {limit})",
+            )
             return False
         now = _monotonic()
         last, call.last_write = call.last_write, now
