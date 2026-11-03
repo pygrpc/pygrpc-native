@@ -4,6 +4,26 @@ All notable changes are listed here. The project follows
 [semantic versioning](https://semver.org); see
 [Compatibility](README.md#compatibility) for what that covers.
 
+## 0.7.2 (2026-11-03)
+
+### Changed
+
+- `aio.server()` takes events on its event loop instead of a dispatch thread,
+  which cuts its server CPU per call by about 27% in a unary echo. (#107)
+- On `aio.server()`, small stream messages that handlers write after a wait,
+  such as tokens from an LLM decode step, go to the Rust side together at the
+  end of the loop iteration, so the ones for one connection can share a write.
+  With 1024 streams this cuts server CPU per message by about 28%. (#115)
+
+### Fixed
+
+- `server()` takes `grpc.server()`'s `xds` argument; `xds=True` raises
+  `NotImplementedError`. (#105)
+- `peer()` of an IPv6 client is `ipv6:%5B...%5D:port`, as in grpcio. (#111)
+- On `aio.server()`, a client leaving a stream whose writes were waiting for
+  room could make the server drop other events that came with it, so a new
+  call could wait until its deadline. (#117)
+
 ## 0.7.1 (2026-10-31)
 
 ### Fixed
