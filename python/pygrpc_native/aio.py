@@ -24,7 +24,6 @@ from pygrpc_native._native import (
 from pygrpc_native._server import (
     _AUTH_CONTEXT,
     _LIMIT_EXCEEDED,
-    _NO_DEADLINE,
     _Codec,
     _code,
     _behavior,
@@ -214,9 +213,9 @@ class _Context(aio.ServicerContext):
     def auth_context(self) -> dict[str, list[bytes]]:
         return _AUTH_CONTEXT
 
-    def time_remaining(self) -> float:
+    def time_remaining(self) -> float | None:
         if self._call.deadline is None:
-            return _NO_DEADLINE
+            return None
         return max(0.0, self._call.deadline - time.monotonic())
 
     def cancelled(self) -> bool:
@@ -310,7 +309,7 @@ class _SyncContext:
     def auth_context(self) -> dict[str, list[bytes]]:
         return self._context.auth_context()
 
-    def time_remaining(self) -> float:
+    def time_remaining(self) -> float | None:
         return self._context.time_remaining()
 
     def __getattr__(self, name: str) -> Any:

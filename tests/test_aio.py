@@ -110,13 +110,14 @@ async def _unary(
     kind: str,
     behavior: Behavior,
     host: str = "127.0.0.1",
+    timeout: float | None = 5,
 ) -> Any:
     a_pb2, a_pb2_grpc = pb
     server, port = await _serve(pb, kind, unary=behavior, host=host)
     try:
         async with aio.insecure_channel(f"{host}:{port}") as channel:
             call = a_pb2_grpc.SStub(channel).Unary(
-                a_pb2.Msg(s="x"), timeout=5, metadata=[("x-in", "1")]
+                a_pb2.Msg(s="x"), timeout=timeout, metadata=[("x-in", "1")]
             )
             try:
                 response = await call
@@ -457,6 +458,9 @@ def test_context_details(pb: tuple[Any, Any], kind: str) -> None:
         "security_level": [b"TSI_SECURITY_NONE"],
     }
     assert seen["code"] is None and seen["cancelled"] is False
+    # No deadline: grpc.aio returns None; pygrpc-native must match.
+    assert asyncio.run(_unary(pb, kind, look, timeout=None))[0] == "OK"
+    assert seen["remaining"] is None
     assert asyncio.run(_unary(pb, kind, look, host="[::1]"))[0] == "OK"
     assert seen["peer"].startswith("ipv6:%5B::1%5D:")
 
