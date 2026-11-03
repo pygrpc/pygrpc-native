@@ -44,8 +44,10 @@ SCENARIOS = {
     "aio.server() stream": ("aio", STREAM, 300),
 }
 
-# Smallest change reported as a regression or an improvement.
-THRESHOLDS = {"cpu_us": 0.10, "vcs": 0.05}
+# Smallest change reported as a regression or an improvement: twice the
+# largest change seen in 20 runs comparing a build with itself on GitHub's
+# runners (4.6% CPU, 3.3% switches), and at least 10% for CPU.
+THRESHOLDS = {"cpu_us": 0.10, "vcs": 0.07}
 METRICS = {"cpu_us": "CPU µs/call", "vcs": "context switches/call"}
 
 
