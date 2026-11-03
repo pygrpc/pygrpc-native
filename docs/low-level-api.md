@@ -63,6 +63,11 @@ before `start()`, so the port can be bound before the methods are known.
 | `metrics()` | call counts and latencies per method and status; `None` without `metrics=True` |
 | `close()` | stop without waiting for calls in flight; their clients get UNAVAILABLE |
 
+Metadata is a list of `(key, value)` pairs with lowercase keys. Values are
+`str` or ASCII `bytes`, or any `bytes` for keys ending in `-bin`. If a method
+can't send the metadata it was given, it raises `ValueError` and ends the call
+with `INTERNAL`, as grpcio does.
+
 `recv_batch` returns `(kind, call_id, method_id, payload, client_key)`
 tuples. `kind` is `EVENT_CALL` for a new call and `EVENT_CANCEL` when the
 client left a stream before it ended (`payload` and `client_key` are then
