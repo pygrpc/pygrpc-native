@@ -9,7 +9,8 @@ use tokio::sync::watch;
 use tokio_rustls::TlsAcceptor;
 
 use super::connection::{serve_connection, HANDSHAKE_TIMEOUT};
-use super::Shared;
+use super::tls::PeerAuth;
+use super::{Peer, Shared};
 
 // Unix sockets have no peer address, so each connection gets its own name.
 static NEXT_UNIX_PEER: AtomicU64 = AtomicU64::new(1);
@@ -62,6 +63,10 @@ fn spawn_connection<IO>(
 {
     match tls {
         None => {
+            let peer = Arc::new(Peer {
+                address: peer,
+                auth: None,
+            });
             tokio::spawn(serve_connection(io, peer, shared, shutdown));
         }
         Some(tls) => {
@@ -100,6 +105,19 @@ async fn serve_tls_connection<IO>(
         },
         _ = stopped(&mut shutdown) => return,
     };
+    let certificates = stream.get_ref().1.peer_certificates();
+    let auth = certificates.and_then(|chain| match PeerAuth::new(chain) {
+        Ok(auth) => Some(Arc::new(auth)),
+        // Its calls still go through, showing no identity.
+        Err(err) => {
+            log::warn!("can't read the certificate of {peer}: {err}");
+            None
+        }
+    });
+    let peer = Arc::new(Peer {
+        address: peer,
+        auth,
+    });
     serve_connection(stream, peer, shared, shutdown).await;
 }
 

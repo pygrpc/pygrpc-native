@@ -87,7 +87,7 @@ be read back:
 For runnable sync and asyncio servers with a grpcio client, see
 [examples/README.md](https://github.com/pygrpc/pygrpc-native/blob/main/examples/README.md).
 
-To build from source:
+To build from source, you need Rust 1.88 or later and a C compiler:
 
 ```bash
 pip install maturin
@@ -175,6 +175,23 @@ As in grpcio, a value that isn't an integer is ignored.
 
 </details>
 
+<details>
+<summary><b>Notes on TLS</b></summary>
+
+<br>
+
+- Credentials come from `pygrpc_native.ssl_server_credentials()` and hold one
+  key and certificate chain. You can't replace them while the server runs.
+- rustls is stricter about certificates than grpcio. For example, it refuses
+  a client certificate marked as a CA.
+- `auth_context()` doesn't have grpcio's `ssl_` keys, such as
+  `ssl_session_reused`, and rare subject attributes can look different in
+  `x509_subject`.
+- TLS ends at the native server. Methods on the fallback see a local insecure
+  connection and no client certificate.
+
+</details>
+
 ## Low-level API
 
 `NativeGrpcFront` is the layer under `server()`. You receive each call as an
@@ -196,7 +213,7 @@ def serve():
 threading.Thread(target=serve).start()
 ```
 
-Streaming, call details, response metadata, bearer tokens and metrics are
+Streaming, call details, response metadata, bearer tokens, TLS and metrics are
 covered in [docs/low-level-api.md](https://github.com/pygrpc/pygrpc-native/blob/main/docs/low-level-api.md).
 
 ## Benchmarks
@@ -225,18 +242,6 @@ has all the numbers and explains how they were measured.
 - `NativeGrpcFront` only serves unary and server-streaming methods. Other
   kinds can go through the fallback server, and `server()` and `aio.server()`
   send them there for you.
-- `NativeGrpcFront` checks bearer tokens itself, while `server()` and
-  `aio.server()` run grpcio interceptors.
-- TLS takes one key and certificate chain, and credentials made by
-  `pygrpc_native.ssl_server_credentials()`. Certificates can't be replaced
-  while the server runs.
-- Over TLS, `auth_context()` has the security type and level but not the
-  client's certificate, and `peer_identities()` returns None. Methods on the
-  fallback see an insecure local connection.
-- rustls checks certificates more strictly than grpcio. For example, it
-  refuses a client certificate that's marked as a CA.
-- As with grpc-core, binding a Unix socket path replaces any socket file
-  already there.
 - `SO_REUSEPORT` is set only when `grpc.so_reuseport` is 1. grpcio sets it by
   default, so binding a port that another server already uses works with
   grpcio but fails here.

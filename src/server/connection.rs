@@ -15,7 +15,7 @@ use super::fallback::Fallback;
 use super::listener::stopped;
 use super::order::Sequencer;
 use super::stream::serve_stream;
-use super::{Keepalive, Shared, CALL_DRAIN_TIMEOUT, CONNECTION_DRAIN_TIMEOUT};
+use super::{Keepalive, Peer, Shared, CALL_DRAIN_TIMEOUT, CONNECTION_DRAIN_TIMEOUT};
 
 // Fixed windows instead of BDP probing. A stream that is not read holds up
 // at most STREAM_WINDOW; the connection window is the protocol maximum so such
@@ -52,7 +52,7 @@ impl Drop for OpenConnection {
 
 pub(crate) async fn serve_connection<IO>(
     io: IO,
-    peer: Arc<str>,
+    peer: Arc<Peer>,
     shared: Arc<Shared>,
     mut shutdown: watch::Receiver<bool>,
 ) where

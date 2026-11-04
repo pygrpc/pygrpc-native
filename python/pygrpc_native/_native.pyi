@@ -20,10 +20,18 @@ STREAM_CLOSED: int
 Event = tuple[int, int, int, bytes | str | bool | None, bytes | str | None]
 
 # (metadata, peer, time_remaining); metadata values are bytes for -bin keys.
-CallDetails = tuple[tuple[tuple[str, str | bytes], ...], str, float | None]
+# A call from a client with a certificate adds a PeerAuth.
+CallDetails = (
+    tuple[tuple[tuple[str, str | bytes], ...], str, float | None]
+    | tuple[tuple[tuple[str, str | bytes], ...], str, float | None, PeerAuth]
+)
 DetailedEvent = tuple[
     int, int, int, bytes | str | bool | None, bytes | str | None, CallDetails | None
 ]
+
+class PeerAuth:
+    def auth_context(self) -> dict[str, list[bytes]]: ...
+    def peer_identity_key(self) -> str: ...
 
 class NativeGrpcFront:
     def __init__(

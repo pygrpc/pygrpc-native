@@ -55,6 +55,31 @@ struct Running {
     shutdown: watch::Sender<bool>,
 }
 
+/// The certificate a client connected with, as grpcio's context shows it.
+#[pyclass(module = "pygrpc_native", frozen)]
+struct PeerAuth(Arc<server::tls::PeerAuth>);
+
+#[pymethods]
+impl PeerAuth {
+    /// Like ``ServicerContext.auth_context()``.
+    fn auth_context<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
+        let context = PyDict::new(py);
+        for (key, value) in &self.0.properties {
+            let value = PyBytes::new(py, value);
+            match context.get_item(key)? {
+                Some(values) => values.cast::<PyList>()?.append(value)?,
+                None => context.set_item(key, PyList::new(py, [value])?)?,
+            }
+        }
+        Ok(context)
+    }
+
+    /// Like ``ServicerContext.peer_identity_key()``.
+    fn peer_identity_key(&self) -> &'static str {
+        self.0.identity_key
+    }
+}
+
 /// The `tls` argument of `NativeGrpcFront`.
 type TlsArgs = (Vec<u8>, Vec<u8>, Option<Vec<u8>>, bool);
 
@@ -419,7 +444,8 @@ impl NativeGrpcFront {
     /// tuple of ``(key, value)`` pairs in the order received, without the
     /// transport headers, where value is bytes for ``-bin`` keys and str
     /// otherwise. time_remaining is the seconds left before the deadline, or
-    /// None without one.
+    /// None without one. A call from a client with a certificate has a fourth
+    /// item, a ``PeerAuth``.
     #[pyo3(signature = (max_events, timeout_ms=None))]
     fn recv_batch_details<'py>(
         &self,
@@ -781,7 +807,7 @@ fn event_tuple<'py>(py: Python<'py>, event: Event) -> PyResult<Bound<'py, PyTupl
         } => {
             let key: Bound<'py, PyAny> = match client_key {
                 ClientKey::Id(id) => PyBytes::new(py, &id).into_any(),
-                ClientKey::Peer(peer) => peer.as_ref().into_pyobject(py)?.into_any(),
+                ClientKey::Peer(peer) => peer.address.as_ref().into_pyobject(py)?.into_any(),
             };
             (
                 EVENT_CALL,
@@ -839,12 +865,15 @@ fn details_tuple<'py>(py: Python<'py>, details: &CallDetails) -> PyResult<Bound<
             .saturating_duration_since(tokio::time::Instant::now())
             .as_secs_f64()
     });
-    (
-        PyTuple::new(py, metadata)?,
-        details.peer.as_ref(),
-        remaining,
-    )
-        .into_pyobject(py)
+    let metadata = PyTuple::new(py, metadata)?;
+    let peer = details.peer.address.as_ref();
+    match &details.peer.auth {
+        None => (metadata, peer, remaining).into_pyobject(py),
+        Some(auth) => {
+            let auth = Bound::new(py, PeerAuth(auth.clone()))?;
+            (metadata, peer, remaining, auth).into_pyobject(py)
+        }
+    }
 }
 
 enum StdListener {
@@ -958,6 +987,7 @@ fn bind_tcp(
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let _ = pyo3_log::try_init();
     m.add_class::<NativeGrpcFront>()?;
+    m.add_class::<PeerAuth>()?;
     m.add("EVENT_CALL", EVENT_CALL)?;
     m.add("EVENT_CANCEL", EVENT_CANCEL)?;
     m.add("_EVENT_RESOLVE", EVENT_RESOLVE)?;

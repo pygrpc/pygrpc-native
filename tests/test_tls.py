@@ -36,6 +36,12 @@ def handlers() -> dict[str, grpc.RpcMethodHandler]:
     def bidi(requests: Iterator[bytes], context: Any) -> Iterator[bytes]:
         yield from requests
 
+    def certificate(request: bytes, context: Any) -> bytes:
+        return describe(context)
+
+    def certificate_stream(request: bytes, context: Any) -> Iterator[bytes]:
+        yield describe(context)
+
     def security(request: bytes, context: Any) -> bytes:
         auth = context.auth_context()
         return b" ".join(auth["transport_security_type"] + auth["security_level"])
@@ -43,9 +49,27 @@ def handlers() -> dict[str, grpc.RpcMethodHandler]:
     return {
         "U": grpc.unary_unary_rpc_method_handler(unary, ident, ident),
         "A": grpc.unary_unary_rpc_method_handler(security, ident, ident),
+        "C": grpc.unary_unary_rpc_method_handler(certificate, ident, ident),
+        "D": grpc.unary_stream_rpc_method_handler(certificate_stream, ident, ident),
         "S": grpc.unary_stream_rpc_method_handler(stream, ident, ident),
         "B": grpc.stream_stream_rpc_method_handler(bidi, ident, ident),
     }
+
+
+def describe(context: Any) -> bytes:
+    # The ssl_ keys say how the connection was set up, not who the client is,
+    # and each grpcio version has its own.
+    auth = {
+        key: value
+        for key, value in context.auth_context().items()
+        if not key.startswith("ssl_")
+    }
+    found = (
+        sorted(auth.items()),
+        context.peer_identities(),
+        context.peer_identity_key(),
+    )
+    return repr(found).encode()
 
 
 def credentials(root: bytes | None = None, require: bool = False) -> Any:
@@ -121,6 +145,25 @@ def test_client_certificates(
             assert failure.value.code() == grpc.StatusCode.UNAVAILABLE
 
 
+@pytest.mark.parametrize("name", ["client", "san", "uris", "chained", "bmp", "multi"])
+def test_client_certificate_details_match_grpcio(name: str) -> None:
+    def details(kind: str) -> list[bytes]:
+        server_credentials = credentials(pem("ca.pem"), True)
+        with (
+            serving(kind, server_credentials) as port,
+            client(port, f"{name}.key", f"{name}.pem") as channel,
+        ):
+            unary = channel.unary_unary("/t.S/C", ident, ident)(b"", timeout=5)
+            return [
+                unary,
+                *channel.unary_stream("/t.S/D", ident, ident)(b"", timeout=5),
+            ]
+
+    expected = details("grpcio")
+    assert b"x509_pem_cert" in expected[0]
+    assert details("native") == expected
+
+
 def test_plaintext_client_is_refused(kind: str) -> None:
     with (
         serving(kind, credentials()) as port,
@@ -136,7 +179,7 @@ def test_aio_server_over_tls() -> None:
         return context.auth_context()["transport_security_type"][0]
 
     async def stream(request: bytes, context: Any) -> AsyncIterator[bytes]:
-        yield request
+        yield context.peer_identities()[0]
 
     async def run() -> tuple[bytes, list[bytes]]:
         server = pygrpc_native.aio.server()
@@ -147,11 +190,15 @@ def test_aio_server_over_tls() -> None:
                 "S": grpc.unary_stream_rpc_method_handler(stream, ident, ident),
             },
         )
-        port = server.add_secure_port("localhost:0", credentials())
+        server_credentials = credentials(pem("ca.pem"), True)
+        port = server.add_secure_port("localhost:0", server_credentials)
         await server.start()
         try:
             async with aio.secure_channel(
-                f"localhost:{port}", grpc.ssl_channel_credentials(pem("ca.pem"))
+                f"localhost:{port}",
+                grpc.ssl_channel_credentials(
+                    pem("ca.pem"), pem("client.key"), pem("client.pem")
+                ),
             ) as channel:
                 answer = await channel.unary_unary("/t.S/U", ident, ident)(b"a")
                 call = channel.unary_stream("/t.S/S", ident, ident)(b"b")
@@ -159,7 +206,7 @@ def test_aio_server_over_tls() -> None:
         finally:
             await server.stop(None)
 
-    assert asyncio.run(run()) == (b"ssl", [b"b"])
+    assert asyncio.run(run()) == (b"ssl", [b"test-client"])
 
 
 def test_credentials_the_front_cant_use() -> None:

@@ -67,9 +67,16 @@ pub struct Keepalive {
     pub without_calls: bool,
 }
 
+/// Who a connection's calls come from.
+pub struct Peer {
+    pub address: Arc<str>,
+    /// The client's certificate, on a connection that presented one.
+    pub auth: Option<Arc<tls::PeerAuth>>,
+}
+
 pub enum ClientKey {
     Id(Bytes),
-    Peer(Arc<str>),
+    Peer(Arc<Peer>),
 }
 
 /// A request metadata value: text, or the decoded bytes of a `-bin` key.
@@ -82,7 +89,7 @@ pub enum MetadataValue {
 /// is created with `call_details`.
 pub struct CallDetails {
     pub metadata: Vec<(String, MetadataValue)>,
-    pub peer: Arc<str>,
+    pub peer: Arc<Peer>,
     pub deadline: Option<tokio::time::Instant>,
 }
 
