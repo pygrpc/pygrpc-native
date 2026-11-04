@@ -57,10 +57,13 @@ def handlers() -> dict[str, grpc.RpcMethodHandler]:
 
 
 def describe(context: Any) -> bytes:
-    auth = context.auth_context()
-    # These two say how the connection was set up, not who the client is.
-    auth.pop("ssl_session_reused", None)
-    auth.pop("ssl_negotiated_key_exchange_group", None)
+    # The ssl_ keys say how the connection was set up, not who the client is,
+    # and each grpcio version has its own.
+    auth = {
+        key: value
+        for key, value in context.auth_context().items()
+        if not key.startswith("ssl_")
+    }
     found = (
         sorted(auth.items()),
         context.peer_identities(),
