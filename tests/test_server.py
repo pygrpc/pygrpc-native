@@ -305,6 +305,22 @@ def test_context_details(pb: tuple[Any, Any], kind: str) -> None:
     assert seen["peer"].startswith("ipv6:%5B::1%5D:")
 
 
+def test_auth_context_is_fresh_per_call(pb: tuple[Any, Any], kind: str) -> None:
+    seen: dict[str, Any] = {}
+
+    def mutate(request: Any, context: grpc.ServicerContext) -> Any:
+        context.auth_context()["x"] = [b"y"]
+        return request
+
+    def look(request: Any, context: grpc.ServicerContext) -> Any:
+        seen["auth"] = context.auth_context()
+        return request
+
+    assert _unary(pb, kind, mutate)[0] == "OK"
+    assert _unary(pb, kind, look)[0] == "OK"
+    assert "x" not in seen["auth"]
+
+
 def test_client_cancel_runs_callbacks(pb: tuple[Any, Any], kind: str) -> None:
     t_pb2, t_pb2_grpc = pb
     ran = threading.Event()
@@ -345,6 +361,71 @@ def test_initial_metadata_twice_is_rejected(pb: tuple[Any, Any], kind: str) -> N
 
     assert _unary(pb, kind, twice)[0] == "OK"
     assert errors == ["Initial metadata no longer allowed!"]
+
+
+BAD_METADATA = (("X-Upper", "x"),)
+
+
+def _bad_initial(request: Any, context: grpc.ServicerContext) -> Any:
+    context.send_initial_metadata(BAD_METADATA)
+    return request
+
+
+def _bad_trailing(request: Any, context: grpc.ServicerContext) -> Any:
+    context.set_trailing_metadata(BAD_METADATA)
+    return request
+
+
+def _bad_trailing_abort(request: Any, context: grpc.ServicerContext) -> Any:
+    context.set_trailing_metadata(BAD_METADATA)
+    context.abort(grpc.StatusCode.NOT_FOUND, "missing")
+
+
+def _bad_stream_initial(request: Any, context: grpc.ServicerContext) -> Any:
+    context.send_initial_metadata(BAD_METADATA)
+    yield request
+
+
+def _bad_stream_trailing(request: Any, context: grpc.ServicerContext) -> Any:
+    context.set_trailing_metadata(BAD_METADATA)
+    yield request
+
+
+@pytest.mark.parametrize("behavior", [_bad_initial, _bad_trailing, _bad_trailing_abort])
+def test_unary_with_invalid_metadata_fails(
+    pb: tuple[Any, Any], behavior: Behavior
+) -> None:
+    # Recent grpcio fails these calls the same way; grpcio 1.64 hangs on them.
+    assert _unary(pb, "native", behavior) == (
+        grpc.StatusCode.INTERNAL,
+        "Invalid metadata",
+        [],
+    )
+
+
+@pytest.mark.parametrize(
+    ("behavior", "received"),
+    [(_bad_stream_initial, []), (_bad_stream_trailing, ["x"])],
+)
+def test_stream_with_invalid_metadata_fails(
+    pb: tuple[Any, Any], behavior: Behavior, received: list[str]
+) -> None:
+    assert _stream(pb, "native", behavior) == (
+        received,
+        grpc.StatusCode.INTERNAL,
+        "Invalid metadata",
+        [],
+    )
+
+
+def test_ascii_bytes_on_a_text_key_go_out_as_text(
+    pb: tuple[Any, Any], kind: str
+) -> None:
+    def trailing(request: Any, context: grpc.ServicerContext) -> Any:
+        context.set_trailing_metadata((("x-bytes", b"abc"),))
+        return request
+
+    assert _unary(pb, kind, trailing) == ("OK", "x", [], [("x-bytes", "abc")])
 
 
 def test_lifecycle(pb: tuple[Any, Any]) -> None:
