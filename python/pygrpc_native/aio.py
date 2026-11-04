@@ -32,6 +32,7 @@ from pygrpc_native._server import (
     _ConcurrencyLimit,
     _counted,
     _fallback_socket,
+    _tls_of,
     _HandlerCallDetails,
     _Metadatum,
     _Methods,
@@ -444,25 +445,12 @@ class Server(_Codec, _Methods, aio.Server):
             self._registered[f"/{service_name}/{name}"] = handler
 
     def add_insecure_port(self, address: str) -> int:
-        if self._front is not None:
-            raise RuntimeError("only one port is supported")
-        try:
-            self._front = NativeGrpcFront(
-                address,
-                [],
-                io_threads=self._io_threads,
-                call_details=True,
-                delay_stream_headers=True,
-                **self._front_args,
-            )
-        except OSError as exc:
-            raise RuntimeError(f"Failed to bind to address {address}") from exc
-        return self._front.bound_port
+        return self._add_port(address, None)
 
     def add_secure_port(
         self, address: str, server_credentials: grpc.ServerCredentials
     ) -> int:
-        raise NotImplementedError("TLS isn't supported yet")
+        return self._add_port(address, _tls_of(server_credentials))
 
     async def start(self) -> None:
         if self._stopping:

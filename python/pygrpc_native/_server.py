@@ -24,6 +24,8 @@ from pygrpc_native._native import (
 _LOGGER = logging.getLogger(__name__)
 
 _Metadatum = collections.namedtuple("_Metadatum", ("key", "value"))
+# private key, certificate chain, root certificates, require_client_auth
+_Tls = tuple[bytes, bytes, bytes | None, bool]
 
 
 class _HandlerCallDetails(
@@ -190,17 +192,73 @@ def _use_handler(
     return True
 
 
+class _SslServerCredentials(grpc.ServerCredentials):
+    """grpcio's credentials, which also work on a grpcio server, with the PEM
+    data the native front needs: grpcio's own object doesn't give it back."""
+
+    def __init__(self, credentials: grpc.ServerCredentials, tls: _Tls) -> None:
+        super().__init__(credentials._credentials)
+        self.tls = tls
+
+
+def ssl_server_credentials(
+    private_key_certificate_chain_pairs: Iterable[tuple[bytes, bytes]],
+    root_certificates: bytes | None = None,
+    require_client_auth: bool = False,
+) -> grpc.ServerCredentials:
+    """Like `grpc.ssl_server_credentials()`, for `add_secure_port()` on
+    `server()` and `aio.server()`. Takes one key and certificate chain."""
+    pairs = list(private_key_certificate_chain_pairs)
+    credentials = grpc.ssl_server_credentials(
+        pairs, root_certificates, require_client_auth
+    )
+    if len(pairs) > 1:
+        raise NotImplementedError("only one key and certificate chain is supported")
+    key, chain = pairs[0]
+    return _SslServerCredentials(
+        credentials, (key, chain, root_certificates, require_client_auth)
+    )
+
+
+def _tls_of(credentials: grpc.ServerCredentials) -> _Tls:
+    if not isinstance(credentials, _SslServerCredentials):
+        raise NotImplementedError(
+            "add_secure_port() needs pygrpc_native.ssl_server_credentials(): "
+            "the certificates in grpc.ssl_server_credentials() can't be read back"
+        )
+    return credentials.tls
+
+
 class _Methods:
     """The methods a server serves natively: `_table` holds
     `(path, registered handler, server streaming)` by method id, with None for
     a method only generic handlers know, which is looked up on every call."""
 
     _front: NativeGrpcFront | None
+    _io_threads: int
+    _front_args: dict[str, Any]
     _registered: dict[str, grpc.RpcMethodHandler]
     _generic: list[grpc.GenericRpcHandler]
     _table: list[tuple[str, grpc.RpcMethodHandler | None, bool]]
     # Paths answered for good: their method id, or None for the fallback.
     _resolved: dict[str, int | None]
+
+    def _add_port(self, address: str, tls: _Tls | None) -> int:
+        if self._front is not None:
+            raise RuntimeError("only one port is supported")
+        try:
+            self._front = NativeGrpcFront(
+                address,
+                [],
+                io_threads=self._io_threads,
+                call_details=True,
+                delay_stream_headers=True,
+                tls=tls,
+                **self._front_args,
+            )
+        except OSError as exc:
+            raise RuntimeError(f"Failed to bind to address {address}") from exc
+        return self._front.bound_port
 
     def _lookup(self, details: grpc.HandlerCallDetails) -> grpc.RpcMethodHandler | None:
         for generic in self._generic:
@@ -592,25 +650,12 @@ class Server(_Codec, _Methods, grpc.Server):
             self._registered[f"/{service_name}/{name}"] = handler
 
     def add_insecure_port(self, address: str) -> int:
-        if self._front is not None:
-            raise RuntimeError("only one port is supported")
-        try:
-            self._front = NativeGrpcFront(
-                address,
-                [],
-                io_threads=self._io_threads,
-                call_details=True,
-                delay_stream_headers=True,
-                **self._front_args,
-            )
-        except OSError as exc:
-            raise RuntimeError(f"Failed to bind to address {address}") from exc
-        return self._front.bound_port
+        return self._add_port(address, None)
 
     def add_secure_port(
         self, address: str, server_credentials: grpc.ServerCredentials
     ) -> int:
-        raise NotImplementedError("TLS isn't supported yet")
+        return self._add_port(address, _tls_of(server_credentials))
 
     def start(self) -> None:
         with self._lock:

@@ -26,7 +26,7 @@ pub(super) const STREAM_WINDOW: u32 = 4 << 20;
 pub(super) const CONNECTION_WINDOW: u32 = (1 << 31) - 1;
 
 // grpc-core's default; a connection that never finishes the preface is dropped.
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
+pub(super) const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(120);
 
 // grpc-core's default ping timeout: the longest a keepalive ping goes
 // unanswered, even while the client keeps sending.

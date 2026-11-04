@@ -38,7 +38,7 @@ pass the serialized reply to `respond`.
 
 ## Reference
 
-`NativeGrpcFront(target, methods, io_threads=2, client_key_metadata=None, call_details=False, delay_stream_headers=False, bearer_token_sha256=None, unauthenticated_message="Unauthenticated", metrics=False, keepalive_time_ms=7200000, keepalive_timeout_ms=20000, keepalive_permit_without_calls=True, max_concurrent_streams=1024, max_metadata_size=16384, reuse_port=False, ordered=False)`
+`NativeGrpcFront(target, methods, io_threads=2, client_key_metadata=None, call_details=False, delay_stream_headers=False, bearer_token_sha256=None, unauthenticated_message="Unauthenticated", metrics=False, keepalive_time_ms=7200000, keepalive_timeout_ms=20000, keepalive_permit_without_calls=True, max_concurrent_streams=1024, max_metadata_size=16384, reuse_port=False, ordered=False, tls=None)`
 binds `host:port` (every address the host resolves to), `unix:path` or
 `unix:///path`. Port 0 picks a free port. `methods` lists
 `(path, server_streaming)` pairs, where a path is `/package.Service/Method`
@@ -134,6 +134,19 @@ ones before it have arrived in full or ended.
 `set_fallback` lets one port serve methods you don't list: run a regular
 `grpc.Server` on a Unix socket and its methods are proxied there, with its
 interceptors.
+
+## TLS
+
+`tls` serves the port over TLS. It's a tuple of the private key, the
+certificate chain, the root certificates and whether client certificates are
+required. All but the last are PEM bytes, and the root certificates can be
+None unless client certificates are required:
+
+```python
+front = NativeGrpcFront(target, methods, tls=(key, chain, None, False))
+```
+
+Calls forwarded to the fallback stay on its Unix socket without TLS.
 
 ## Metrics
 

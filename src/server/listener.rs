@@ -4,9 +4,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
+use tokio_rustls::TlsAcceptor;
 
-use super::connection::serve_connection;
+use super::connection::{serve_connection, HANDSHAKE_TIMEOUT};
 use super::Shared;
 
 // Unix sockets have no peer address, so each connection gets its own name.
@@ -25,6 +27,7 @@ pub async fn accept_loop(
     listener: Listener,
     shared: Arc<Shared>,
     mut shutdown: watch::Receiver<bool>,
+    tls: Option<TlsAcceptor>,
 ) {
     loop {
         let accepted = tokio::select! {
@@ -34,20 +37,10 @@ pub async fn accept_loop(
         match accepted {
             Ok(Accepted::Tcp(stream, peer)) => {
                 let _ = stream.set_nodelay(true);
-                tokio::spawn(serve_connection(
-                    stream,
-                    peer,
-                    shared.clone(),
-                    shutdown.clone(),
-                ));
+                spawn_connection(stream, peer, shared.clone(), shutdown.clone(), &tls);
             }
             Ok(Accepted::Unix(stream, peer)) => {
-                tokio::spawn(serve_connection(
-                    stream,
-                    peer,
-                    shared.clone(),
-                    shutdown.clone(),
-                ));
+                spawn_connection(stream, peer, shared.clone(), shutdown.clone(), &tls);
             }
             Err(err) => {
                 // Out of file descriptors (EMFILE): back off instead of spinning.
@@ -56,6 +49,58 @@ pub async fn accept_loop(
             }
         }
     }
+}
+
+fn spawn_connection<IO>(
+    io: IO,
+    peer: Arc<str>,
+    shared: Arc<Shared>,
+    shutdown: watch::Receiver<bool>,
+    tls: &Option<TlsAcceptor>,
+) where
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    match tls {
+        None => {
+            tokio::spawn(serve_connection(io, peer, shared, shutdown));
+        }
+        Some(tls) => {
+            tokio::spawn(serve_tls_connection(
+                tls.clone(),
+                io,
+                peer,
+                shared,
+                shutdown,
+            ));
+        }
+    }
+}
+
+// On the connection's own task, so a slow client can't hold up the accept loop.
+async fn serve_tls_connection<IO>(
+    tls: TlsAcceptor,
+    io: IO,
+    peer: Arc<str>,
+    shared: Arc<Shared>,
+    mut shutdown: watch::Receiver<bool>,
+) where
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let stream = tokio::select! {
+        result = tokio::time::timeout(HANDSHAKE_TIMEOUT, tls.accept(io)) => match result {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(err)) => {
+                log::debug!("TLS handshake failed: {err}");
+                return;
+            }
+            Err(_) => {
+                log::debug!("TLS handshake timed out");
+                return;
+            }
+        },
+        _ = stopped(&mut shutdown) => return,
+    };
+    serve_connection(stream, peer, shared, shutdown).await;
 }
 
 enum Accepted {
