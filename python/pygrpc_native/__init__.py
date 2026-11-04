@@ -8,6 +8,7 @@ from pygrpc_native._native import (
     STREAM_FULL,
     STREAM_SENT,
     NativeGrpcFront,
+    PeerAuth,
     __version__,
 )
 
@@ -23,6 +24,7 @@ __all__ = [
     "STREAM_FULL",
     "STREAM_SENT",
     "NativeGrpcFront",
+    "PeerAuth",
     "__version__",
     "aio",
     "server",

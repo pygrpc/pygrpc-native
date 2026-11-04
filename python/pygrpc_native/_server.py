@@ -19,6 +19,7 @@ from pygrpc_native._native import (
     _EVENT_RESOLVE,
     _MAX_RESOLVED,
     NativeGrpcFront,
+    PeerAuth,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -408,6 +409,20 @@ class _FallbackLimit(grpc.ServerInterceptor):
         return _with_behavior(handler, behavior)
 
 
+def _peer_identities(auth: PeerAuth | None) -> list[bytes] | None:
+    return None if auth is None else auth.auth_context()[auth.peer_identity_key()]
+
+
+def _peer_identity_key(auth: PeerAuth | None) -> str | None:
+    return None if auth is None else auth.peer_identity_key()
+
+
+def _auth_context(
+    auth: PeerAuth | None, default: dict[str, list[bytes]]
+) -> dict[str, list[bytes]]:
+    return default if auth is None else auth.auth_context()
+
+
 class _Call:
     def __init__(
         self,
@@ -418,6 +433,7 @@ class _Call:
         metadata: tuple[tuple[str, str | bytes], ...],
         peer: str,
         time_remaining: float | None,
+        auth: PeerAuth | None = None,
     ) -> None:
         self.call_id = call_id
         self.method = method
@@ -427,6 +443,7 @@ class _Call:
         self.streaming = streaming
         self.metadata = metadata
         self.peer = peer
+        self.auth = auth
         self.deadline = (
             None if time_remaining is None else time.monotonic() + time_remaining
         )
@@ -470,14 +487,14 @@ class _Context(grpc.ServicerContext):
     def peer(self) -> str:
         return self._call.peer
 
-    def peer_identities(self) -> None:
-        return None
+    def peer_identities(self) -> list[bytes] | None:
+        return _peer_identities(self._call.auth)
 
-    def peer_identity_key(self) -> None:
-        return None
+    def peer_identity_key(self) -> str | None:
+        return _peer_identity_key(self._call.auth)
 
     def auth_context(self) -> dict[str, list[bytes]]:
-        return self._auth_context
+        return _auth_context(self._call.auth, self._auth_context)
 
     def is_active(self) -> bool:
         return self._call.active

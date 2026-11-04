@@ -230,9 +230,10 @@ has all the numbers and explains how they were measured.
 - TLS takes one key and certificate chain, and credentials made by
   `pygrpc_native.ssl_server_credentials()`. Certificates can't be replaced
   while the server runs.
-- Over TLS, `auth_context()` has the security type and level but not the
-  client's certificate, and `peer_identities()` returns None. Methods on the
-  fallback see an insecure local connection.
+- `auth_context()` has no `ssl_session_reused` or
+  `ssl_negotiated_key_exchange_group`, and rare subject attributes can read
+  differently in `x509_subject`. Methods on the fallback see an insecure local
+  connection there, with no client certificate.
 - rustls checks certificates more strictly than grpcio. For example, it
   refuses a client certificate that's marked as a CA.
 - As with grpc-core, binding a Unix socket path replaces any socket file

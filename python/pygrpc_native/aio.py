@@ -20,12 +20,14 @@ from pygrpc_native._native import (
     EVENT_CANCEL,
     STREAM_CLOSED,
     NativeGrpcFront,
+    PeerAuth,
 )
 from pygrpc_native._server import (
     _LIMIT_EXCEEDED,
     _NO_DEADLINE,
     _Codec,
     _answer,
+    _auth_context,
     _code,
     _behavior,
     _ConcurrencyLimit,
@@ -35,6 +37,8 @@ from pygrpc_native._server import (
     _Metadatum,
     _Methods,
     _parse_options,
+    _peer_identities,
+    _peer_identity_key,
     _split_handlers,
     _tls_of,
     _use_handler,
@@ -76,6 +80,7 @@ class _Call:
         metadata: tuple[tuple[str, str | bytes], ...],
         peer: str,
         time_remaining: float | None,
+        auth: PeerAuth | None = None,
     ) -> None:
         self.call_id = call_id
         self.method = method
@@ -85,6 +90,7 @@ class _Call:
         self.streaming = streaming
         self.metadata = metadata
         self.peer = peer
+        self.auth = auth
         self.deadline = (
             None if time_remaining is None else time.monotonic() + time_remaining
         )
@@ -206,14 +212,14 @@ class _Context(aio.ServicerContext):
     def peer(self) -> str:
         return self._call.peer
 
-    def peer_identities(self) -> None:
-        return None
+    def peer_identities(self) -> list[bytes] | None:
+        return _peer_identities(self._call.auth)
 
-    def peer_identity_key(self) -> None:
-        return None
+    def peer_identity_key(self) -> str | None:
+        return _peer_identity_key(self._call.auth)
 
     def auth_context(self) -> dict[str, list[bytes]]:
-        return self._server._auth_context
+        return _auth_context(self._call.auth, self._server._auth_context)
 
     def time_remaining(self) -> float:
         if self._call.deadline is None:
@@ -302,10 +308,10 @@ class _SyncContext:
     def peer(self) -> str:
         return self._context.peer()
 
-    def peer_identities(self) -> None:
+    def peer_identities(self) -> list[bytes] | None:
         return self._context.peer_identities()
 
-    def peer_identity_key(self) -> None:
+    def peer_identity_key(self) -> str | None:
         return self._context.peer_identity_key()
 
     def auth_context(self) -> dict[str, list[bytes]]:

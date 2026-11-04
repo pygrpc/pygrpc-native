@@ -146,6 +146,10 @@ None unless client certificates are required:
 front = NativeGrpcFront(target, methods, tls=(key, chain, None, False))
 ```
 
+A call from a client with a certificate has a fourth item in its
+`recv_batch_details` details, a `PeerAuth` with `auth_context()` and
+`peer_identity_key()`, which match grpcio's context.
+
 Calls forwarded to the fallback stay on its Unix socket without TLS.
 
 ## Metrics

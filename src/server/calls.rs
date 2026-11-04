@@ -16,7 +16,7 @@ use tonic::server::{ServerStreamingService, UnaryService};
 use tonic::Status;
 
 use super::order::turn;
-use super::{CallDetails, ClientKey, Event, MetadataValue, Shared};
+use super::{CallDetails, ClientKey, Event, MetadataValue, Peer, Shared};
 
 // Bytes a stream queues before the writer waits; a larger message goes alone.
 const STREAM_BUDGET: usize = 256 * 1024;
@@ -134,7 +134,7 @@ pub(super) fn call_timeout(headers: &http::HeaderMap) -> Option<Duration> {
 fn client_key(
     metadata: &tonic::metadata::MetadataMap,
     key: Option<&str>,
-    peer: &Arc<str>,
+    peer: &Arc<Peer>,
 ) -> ClientKey {
     let id = key.and_then(|key| {
         if key.ends_with("-bin") {
@@ -165,7 +165,7 @@ const TRANSPORT_HEADERS: [&str; 5] = [
 pub(super) fn call_details(
     shared: &Shared,
     metadata: &tonic::metadata::MetadataMap,
-    peer: &Arc<str>,
+    peer: &Arc<Peer>,
     deadline: Option<tokio::time::Instant>,
 ) -> Option<Box<CallDetails>> {
     if !shared.call_details {
@@ -222,7 +222,7 @@ impl Drop for UnaryGuard {
 pub(super) struct UnaryCall {
     pub(super) shared: Arc<Shared>,
     pub(super) method_id: u32,
-    pub(super) peer: Arc<str>,
+    pub(super) peer: Arc<Peer>,
     pub(super) deadline: Option<tokio::time::Instant>,
 }
 
@@ -352,7 +352,7 @@ impl Drop for ResponseStream {
 pub(super) struct StreamingCall {
     pub(super) shared: Arc<Shared>,
     pub(super) method_id: u32,
-    pub(super) peer: Arc<str>,
+    pub(super) peer: Arc<Peer>,
     pub(super) deadline: Option<tokio::time::Instant>,
 }
 

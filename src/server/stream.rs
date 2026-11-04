@@ -21,11 +21,11 @@ use super::calls::{
 use super::codec::grpc;
 use super::fallback::Fallback;
 use super::order::Turn;
-use super::{Event, NativeMethod, Resolved, Shared, GRPC_HEADER_LEN};
+use super::{Event, NativeMethod, Peer, Resolved, Shared, GRPC_HEADER_LEN};
 
 async fn route(
     shared: Arc<Shared>,
-    peer: Arc<str>,
+    peer: Arc<Peer>,
     fallback: Arc<Fallback>,
     mut request: http::Request<RequestBody>,
     call: Option<&CallMetrics>,
@@ -120,7 +120,7 @@ async fn route(
 /// time; None is the fallback.
 async fn resolve(
     shared: &Arc<Shared>,
-    peer: &Arc<str>,
+    peer: &Arc<Peer>,
     request: &http::Request<RequestBody>,
     deadline: Option<tokio::time::Instant>,
 ) -> Result<Option<NativeMethod>, Status> {
@@ -153,7 +153,7 @@ async fn resolve(
 
 pub(super) async fn serve_stream(
     shared: Arc<Shared>,
-    peer: Arc<str>,
+    peer: Arc<Peer>,
     fallback: Arc<Fallback>,
     mut request: http::Request<h2::RecvStream>,
     mut respond: h2::server::SendResponse<Bytes>,
