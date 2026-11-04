@@ -229,8 +229,10 @@ has all the numbers and explains how they were measured.
   `aio.server()` run grpcio interceptors.
 - TLS takes one key and certificate chain, and credentials made by
   `pygrpc_native.ssl_server_credentials()`. Certificates can't be replaced
-  while the server runs, and `auth_context()` and `peer_identities()` don't
-  show the client's certificate yet.
+  while the server runs.
+- Over TLS, `auth_context()` has the security type and level but not the
+  client's certificate, and `peer_identities()` returns None. Methods on the
+  fallback see an insecure local connection.
 - rustls checks certificates more strictly than grpcio. For example, it
   refuses a client certificate that's marked as a CA.
 - As with grpc-core, binding a Unix socket path replaces any socket file

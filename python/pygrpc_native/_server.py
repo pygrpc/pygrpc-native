@@ -42,6 +42,10 @@ _AUTH_CONTEXT = {
     "transport_security_type": [b"insecure"],
     "security_level": [b"TSI_SECURITY_NONE"],
 }
+_TLS_AUTH_CONTEXT = {
+    "transport_security_type": [b"ssl"],
+    "security_level": [b"TSI_PRIVACY_AND_INTEGRITY"],
+}
 
 # Options a grpcio server acts on in ways clients notice, which this server
 # can't do: closing connections by age or idleness, limiting connections, and
@@ -235,6 +239,7 @@ class _Methods:
     a method only generic handlers know, which is looked up on every call."""
 
     _front: NativeGrpcFront | None
+    _auth_context: dict[str, list[bytes]]
     _io_threads: int
     _front_args: dict[str, Any]
     _registered: dict[str, grpc.RpcMethodHandler]
@@ -258,6 +263,7 @@ class _Methods:
             )
         except OSError as exc:
             raise RuntimeError(f"Failed to bind to address {address}") from exc
+        self._auth_context = _AUTH_CONTEXT if tls is None else _TLS_AUTH_CONTEXT
         return self._front.bound_port
 
     def _lookup(self, details: grpc.HandlerCallDetails) -> grpc.RpcMethodHandler | None:
@@ -443,9 +449,15 @@ class _Call:
 
 
 class _Context(grpc.ServicerContext):
-    def __init__(self, front: NativeGrpcFront, call: _Call) -> None:
+    def __init__(
+        self,
+        front: NativeGrpcFront,
+        call: _Call,
+        auth_context: dict[str, list[bytes]],
+    ) -> None:
         self._front = front
         self._call = call
+        self._auth_context = auth_context
         self._code: grpc.StatusCode | None = None
         self._details: str | None = None
         self._initial_metadata: Sequence[tuple[str, str | bytes]] | None = None
@@ -465,7 +477,7 @@ class _Context(grpc.ServicerContext):
         return None
 
     def auth_context(self) -> dict[str, list[bytes]]:
-        return _AUTH_CONTEXT
+        return self._auth_context
 
     def is_active(self) -> bool:
         return self._call.active
@@ -662,7 +674,7 @@ class Server(_Codec, _Methods, grpc.Server):
             if self._started:
                 raise ValueError("Cannot start already-started server!")
             if self._front is None:
-                raise RuntimeError("add a port with add_insecure_port() before start()")
+                raise RuntimeError("add a port before start()")
             native, streamed, generic = _split_handlers(
                 self._registered, self._generic_handlers
             )
@@ -879,7 +891,7 @@ class Server(_Codec, _Methods, grpc.Server):
             ok, request = self._request(call, payload)
             if not ok:
                 return
-            context = _Context(self._front, call)  # type: ignore[arg-type]
+            context = _Context(self._front, call, self._auth_context)  # type: ignore[arg-type]
             try:
                 response = call.handler.unary_unary(request, context)
             except _Abort:
@@ -926,7 +938,7 @@ class Server(_Codec, _Methods, grpc.Server):
             ok, request = self._request(call, payload)
             if not ok:
                 return
-            context = _Context(front, call)
+            context = _Context(front, call, self._auth_context)
             try:
                 if call.handler.response_streaming:
                     responses = call.handler.unary_stream(request, context)

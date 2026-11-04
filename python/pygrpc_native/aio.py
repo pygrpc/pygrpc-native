@@ -22,7 +22,6 @@ from pygrpc_native._native import (
     NativeGrpcFront,
 )
 from pygrpc_native._server import (
-    _AUTH_CONTEXT,
     _LIMIT_EXCEEDED,
     _NO_DEADLINE,
     _Codec,
@@ -32,12 +31,12 @@ from pygrpc_native._server import (
     _ConcurrencyLimit,
     _counted,
     _fallback_socket,
-    _tls_of,
     _HandlerCallDetails,
     _Metadatum,
     _Methods,
     _parse_options,
     _split_handlers,
+    _tls_of,
     _use_handler,
     _with_behavior,
 )
@@ -214,7 +213,7 @@ class _Context(aio.ServicerContext):
         return None
 
     def auth_context(self) -> dict[str, list[bytes]]:
-        return _AUTH_CONTEXT
+        return self._server._auth_context
 
     def time_remaining(self) -> float:
         if self._call.deadline is None:
@@ -458,7 +457,7 @@ class Server(_Codec, _Methods, aio.Server):
         if self._started:
             return
         if self._front is None:
-            raise RuntimeError("add a port with add_insecure_port() before start()")
+            raise RuntimeError("add a port before start()")
         self._started = True
         self._loop = asyncio.get_running_loop()
         native, streamed, generic = _split_handlers(

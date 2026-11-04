@@ -36,8 +36,13 @@ def handlers() -> dict[str, grpc.RpcMethodHandler]:
     def bidi(requests: Iterator[bytes], context: Any) -> Iterator[bytes]:
         yield from requests
 
+    def security(request: bytes, context: Any) -> bytes:
+        auth = context.auth_context()
+        return b" ".join(auth["transport_security_type"] + auth["security_level"])
+
     return {
         "U": grpc.unary_unary_rpc_method_handler(unary, ident, ident),
+        "A": grpc.unary_unary_rpc_method_handler(security, ident, ident),
         "S": grpc.unary_stream_rpc_method_handler(stream, ident, ident),
         "B": grpc.stream_stream_rpc_method_handler(bidi, ident, ident),
     }
@@ -82,6 +87,8 @@ def kind(request: pytest.FixtureRequest) -> str:
 def test_calls_over_tls(kind: str) -> None:
     with serving(kind, credentials()) as port, client(port) as channel:
         assert channel.unary_unary("/t.S/U", ident, ident)(b"a", timeout=5) == b"a"
+        security = channel.unary_unary("/t.S/A", ident, ident)(b"", timeout=5)
+        assert security == b"ssl TSI_PRIVACY_AND_INTEGRITY"
         stream = channel.unary_stream("/t.S/S", ident, ident)(b"b", timeout=5)
         assert list(stream) == [b"b", b"b"]
         # Served by the fallback behind the front.
@@ -126,7 +133,7 @@ def test_plaintext_client_is_refused(kind: str) -> None:
 
 def test_aio_server_over_tls() -> None:
     async def unary(request: bytes, context: Any) -> bytes:
-        return request
+        return context.auth_context()["transport_security_type"][0]
 
     async def stream(request: bytes, context: Any) -> AsyncIterator[bytes]:
         yield request
@@ -152,7 +159,7 @@ def test_aio_server_over_tls() -> None:
         finally:
             await server.stop(None)
 
-    assert asyncio.run(run()) == (b"a", [b"b"])
+    assert asyncio.run(run()) == (b"ssl", [b"b"])
 
 
 def test_credentials_the_front_cant_use() -> None:
