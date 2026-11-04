@@ -461,6 +461,48 @@ def test_context_details(pb: tuple[Any, Any], kind: str) -> None:
     assert seen["peer"].startswith("ipv6:%5B::1%5D:")
 
 
+def test_auth_context_is_fresh_per_call(pb: tuple[Any, Any], kind: str) -> None:
+    seen: dict[str, Any] = {}
+
+    async def mutate(request: Any, context: aio.ServicerContext) -> Any:
+        context.auth_context()["x"] = [b"y"]
+        return request
+
+    async def look(request: Any, context: aio.ServicerContext) -> Any:
+        seen["auth"] = context.auth_context()
+        return request
+
+    assert asyncio.run(_unary(pb, kind, mutate))[0] == "OK"
+    assert asyncio.run(_unary(pb, kind, look))[0] == "OK"
+    assert "x" not in seen["auth"]
+
+
+def test_initial_metadata_twice_is_rejected(pb: tuple[Any, Any], kind: str) -> None:
+    errors = []
+
+    async def twice(request: Any, context: aio.ServicerContext) -> Any:
+        await context.send_initial_metadata((("x-a", "1"),))
+        try:
+            await context.send_initial_metadata((("x-b", "2"),))
+        except aio.UsageError as exc:
+            errors.append(str(exc))
+        return request
+
+    assert asyncio.run(_unary(pb, kind, twice))[0] == "OK"
+    assert errors == ["Send initial metadata failed: already sent"]
+
+
+def test_start_on_a_running_or_stopped_server(pb: tuple[Any, Any], kind: str) -> None:
+    async def run() -> None:
+        server, _ = await _serve(pb, kind)
+        await server.start()
+        await server.stop(None)
+        with pytest.raises(aio.UsageError, match="Server not in ready state"):
+            await server.start()
+
+    asyncio.run(run())
+
+
 def test_stop_with_grace(pb: tuple[Any, Any], kind: str) -> None:
     a_pb2, a_pb2_grpc = pb
 
@@ -850,6 +892,76 @@ def test_sync_handlers_get_grpcio_sync_context() -> None:
     assert native == asyncio.run(run(aio.server, stream_abort=False))
     assert native_called == called == ["done"]
     assert native["Abort"] == (grpc.StatusCode.PERMISSION_DENIED, "denied")
+
+
+BAD_METADATA = (("X-Upper", "x"),)
+
+
+async def _bad_initial(request: Any, context: aio.ServicerContext) -> Any:
+    await context.send_initial_metadata(BAD_METADATA)
+    return request
+
+
+async def _bad_trailing(request: Any, context: aio.ServicerContext) -> Any:
+    context.set_trailing_metadata(BAD_METADATA)
+    return request
+
+
+async def _bad_trailing_abort(request: Any, context: aio.ServicerContext) -> Any:
+    context.set_trailing_metadata(BAD_METADATA)
+    await context.abort(grpc.StatusCode.NOT_FOUND, "missing")
+
+
+async def _bad_stream_initial(
+    request: Any, context: aio.ServicerContext
+) -> AsyncIterator[Any]:
+    await context.send_initial_metadata(BAD_METADATA)
+    yield request
+
+
+async def _bad_stream_trailing(
+    request: Any, context: aio.ServicerContext
+) -> AsyncIterator[Any]:
+    context.set_trailing_metadata(BAD_METADATA)
+    yield request
+
+
+@pytest.mark.parametrize("behavior", [_bad_initial, _bad_trailing, _bad_trailing_abort])
+def test_unary_with_invalid_metadata_fails(
+    pb: tuple[Any, Any], behavior: Behavior
+) -> None:
+    # Recent grpcio fails these calls the same way; grpcio 1.64 hangs on them.
+    assert asyncio.run(_unary(pb, "native", behavior)) == (
+        grpc.StatusCode.INTERNAL,
+        "Invalid metadata",
+        [],
+    )
+
+
+@pytest.mark.parametrize(
+    ("behavior", "received"),
+    [(_bad_stream_initial, []), (_bad_stream_trailing, ["x"])],
+)
+def test_stream_with_invalid_metadata_fails(
+    pb: tuple[Any, Any], behavior: Behavior, received: list[str]
+) -> None:
+    assert asyncio.run(_stream(pb, "native", behavior)) == (
+        received,
+        grpc.StatusCode.INTERNAL,
+        "Invalid metadata",
+        [],
+    )
+
+
+def test_ascii_bytes_on_a_text_key_go_out_as_text(
+    pb: tuple[Any, Any], kind: str
+) -> None:
+    async def trailing(request: Any, context: aio.ServicerContext) -> Any:
+        context.set_trailing_metadata((("x-bytes", b"abc"),))
+        return request
+
+    outcome = asyncio.run(_unary(pb, kind, trailing))
+    assert outcome == ("OK", "x", [], [("x-bytes", "abc")])
 
 
 def _echo_server() -> tuple[pygrpc_native.aio.Server, int]:
