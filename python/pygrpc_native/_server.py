@@ -19,11 +19,14 @@ from pygrpc_native._native import (
     _EVENT_RESOLVE,
     _MAX_RESOLVED,
     NativeGrpcFront,
+    PeerAuth,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 _Metadatum = collections.namedtuple("_Metadatum", ("key", "value"))
+# private key, certificate chain, root certificates, require_client_auth
+_Tls = tuple[bytes, bytes, bytes | None, bool]
 
 
 class _HandlerCallDetails(
@@ -39,6 +42,10 @@ _NO_DEADLINE = float(sys.maxsize)
 _AUTH_CONTEXT = {
     "transport_security_type": [b"insecure"],
     "security_level": [b"TSI_SECURITY_NONE"],
+}
+_TLS_AUTH_CONTEXT = {
+    "transport_security_type": [b"ssl"],
+    "security_level": [b"TSI_PRIVACY_AND_INTEGRITY"],
 }
 
 # Options a grpcio server acts on in ways clients notice, which this server
@@ -67,6 +74,15 @@ def _code(code: grpc.StatusCode) -> int:
     if isinstance(code, grpc.StatusCode):
         return code.value[0]
     return grpc.StatusCode.UNKNOWN.value[0]
+
+
+def _answer(send: Callable[[], object]) -> None:
+    # For metadata it can't send, the front has already ended the call with
+    # INTERNAL, as grpcio does.
+    try:
+        send()
+    except ValueError as exc:
+        _LOGGER.error("Invalid response metadata: %s", exc)
 
 
 def _limit(value: int) -> int | None:
@@ -181,17 +197,75 @@ def _use_handler(
     return True
 
 
+class _SslServerCredentials(grpc.ServerCredentials):
+    """grpcio's credentials, which also work on a grpcio server, with the PEM
+    data the native front needs: grpcio's own object doesn't give it back."""
+
+    def __init__(self, credentials: grpc.ServerCredentials, tls: _Tls) -> None:
+        super().__init__(credentials._credentials)
+        self.tls = tls
+
+
+def ssl_server_credentials(
+    private_key_certificate_chain_pairs: Iterable[tuple[bytes, bytes]],
+    root_certificates: bytes | None = None,
+    require_client_auth: bool = False,
+) -> grpc.ServerCredentials:
+    """Like `grpc.ssl_server_credentials()`, for `add_secure_port()` on
+    `server()` and `aio.server()`. Takes one key and certificate chain."""
+    pairs = list(private_key_certificate_chain_pairs)
+    credentials = grpc.ssl_server_credentials(
+        pairs, root_certificates, require_client_auth
+    )
+    if len(pairs) > 1:
+        raise NotImplementedError("only one key and certificate chain is supported")
+    key, chain = pairs[0]
+    return _SslServerCredentials(
+        credentials, (key, chain, root_certificates, require_client_auth)
+    )
+
+
+def _tls_of(credentials: grpc.ServerCredentials) -> _Tls:
+    if not isinstance(credentials, _SslServerCredentials):
+        raise NotImplementedError(
+            "add_secure_port() needs pygrpc_native.ssl_server_credentials(): "
+            "the certificates in grpc.ssl_server_credentials() can't be read back"
+        )
+    return credentials.tls
+
+
 class _Methods:
     """The methods a server serves natively: `_table` holds
     `(path, registered handler, server streaming)` by method id, with None for
     a method only generic handlers know, which is looked up on every call."""
 
     _front: NativeGrpcFront | None
+    _auth_context: dict[str, list[bytes]]
+    _io_threads: int
+    _front_args: dict[str, Any]
     _registered: dict[str, grpc.RpcMethodHandler]
     _generic: list[grpc.GenericRpcHandler]
     _table: list[tuple[str, grpc.RpcMethodHandler | None, bool]]
     # Paths answered for good: their method id, or None for the fallback.
     _resolved: dict[str, int | None]
+
+    def _add_port(self, address: str, tls: _Tls | None) -> int:
+        if self._front is not None:
+            raise RuntimeError("only one port is supported")
+        try:
+            self._front = NativeGrpcFront(
+                address,
+                [],
+                io_threads=self._io_threads,
+                call_details=True,
+                delay_stream_headers=True,
+                tls=tls,
+                **self._front_args,
+            )
+        except OSError as exc:
+            raise RuntimeError(f"Failed to bind to address {address}") from exc
+        self._auth_context = _AUTH_CONTEXT if tls is None else _TLS_AUTH_CONTEXT
+        return self._front.bound_port
 
     def _lookup(self, details: grpc.HandlerCallDetails) -> grpc.RpcMethodHandler | None:
         for generic in self._generic:
@@ -335,6 +409,24 @@ class _FallbackLimit(grpc.ServerInterceptor):
         return _with_behavior(handler, behavior)
 
 
+def _peer_identities(auth: PeerAuth | None) -> list[bytes] | None:
+    return None if auth is None else auth.auth_context()[auth.peer_identity_key()]
+
+
+def _peer_identity_key(auth: PeerAuth | None) -> str | None:
+    return None if auth is None else auth.peer_identity_key()
+
+
+def _auth_context(
+    auth: PeerAuth | None, default: dict[str, list[bytes]]
+) -> dict[str, list[bytes]]:
+    if auth is None:
+        # grpcio gives every call its own dict; hand out a fresh copy of the
+        # defaults so a handler can't leak edits into later calls.
+        return {key: list(values) for key, values in default.items()}
+    return auth.auth_context()
+
+
 class _Call:
     def __init__(
         self,
@@ -345,6 +437,7 @@ class _Call:
         metadata: tuple[tuple[str, str | bytes], ...],
         peer: str,
         time_remaining: float | None,
+        auth: PeerAuth | None = None,
     ) -> None:
         self.call_id = call_id
         self.method = method
@@ -354,6 +447,7 @@ class _Call:
         self.streaming = streaming
         self.metadata = metadata
         self.peer = peer
+        self.auth = auth
         self.deadline = (
             None if time_remaining is None else time.monotonic() + time_remaining
         )
@@ -376,9 +470,15 @@ class _Call:
 
 
 class _Context(grpc.ServicerContext):
-    def __init__(self, front: NativeGrpcFront, call: _Call) -> None:
+    def __init__(
+        self,
+        front: NativeGrpcFront,
+        call: _Call,
+        auth_context: dict[str, list[bytes]],
+    ) -> None:
         self._front = front
         self._call = call
+        self._auth_context = auth_context
         self._code: grpc.StatusCode | None = None
         self._details: str | None = None
         self._initial_metadata: Sequence[tuple[str, str | bytes]] | None = None
@@ -391,14 +491,14 @@ class _Context(grpc.ServicerContext):
     def peer(self) -> str:
         return self._call.peer
 
-    def peer_identities(self) -> None:
-        return None
+    def peer_identities(self) -> list[bytes] | None:
+        return _peer_identities(self._call.auth)
 
-    def peer_identity_key(self) -> None:
-        return None
+    def peer_identity_key(self) -> str | None:
+        return _peer_identity_key(self._call.auth)
 
     def auth_context(self) -> dict[str, list[bytes]]:
-        return _AUTH_CONTEXT
+        return _auth_context(self._call.auth, self._auth_context)
 
     def is_active(self) -> bool:
         return self._call.active
@@ -583,32 +683,19 @@ class Server(_Codec, _Methods, grpc.Server):
             self._registered[f"/{service_name}/{name}"] = handler
 
     def add_insecure_port(self, address: str) -> int:
-        if self._front is not None:
-            raise RuntimeError("only one port is supported")
-        try:
-            self._front = NativeGrpcFront(
-                address,
-                [],
-                io_threads=self._io_threads,
-                call_details=True,
-                delay_stream_headers=True,
-                **self._front_args,
-            )
-        except OSError as exc:
-            raise RuntimeError(f"Failed to bind to address {address}") from exc
-        return self._front.bound_port
+        return self._add_port(address, None)
 
     def add_secure_port(
         self, address: str, server_credentials: grpc.ServerCredentials
     ) -> int:
-        raise NotImplementedError("TLS isn't supported yet")
+        return self._add_port(address, _tls_of(server_credentials))
 
     def start(self) -> None:
         with self._lock:
             if self._started:
                 raise ValueError("Cannot start already-started server!")
             if self._front is None:
-                raise RuntimeError("add a port with add_insecure_port() before start()")
+                raise RuntimeError("add a port before start()")
             native, streamed, generic = _split_handlers(
                 self._registered, self._generic_handlers
             )
@@ -808,11 +895,13 @@ class Server(_Codec, _Methods, grpc.Server):
         if code == grpc.StatusCode.OK:
             code = grpc.StatusCode.UNKNOWN
         details = details if context._details is None else context._details
-        front.fail(
-            call.call_id,
-            _code(code),
-            details,
-            trailing_metadata=list(context._trailing_metadata),
+        _answer(
+            lambda: front.fail(
+                call.call_id,
+                _code(code),
+                details,
+                trailing_metadata=list(context._trailing_metadata),
+            )
         )
 
     def _run_unary(self, call: _Call, payload: bytes) -> None:
@@ -823,7 +912,7 @@ class Server(_Codec, _Methods, grpc.Server):
             ok, request = self._request(call, payload)
             if not ok:
                 return
-            context = _Context(self._front, call)  # type: ignore[arg-type]
+            context = _Context(self._front, call, self._auth_context)  # type: ignore[arg-type]
             try:
                 response = call.handler.unary_unary(request, context)
             except _Abort:
@@ -843,13 +932,17 @@ class Server(_Codec, _Methods, grpc.Server):
                 return
             data = self._serialize(call, response)
             if data is not None:
-                self._front.respond(  # type: ignore[union-attr]
-                    call.call_id,
-                    data,
-                    initial_metadata=None
-                    if context._initial_metadata is None
-                    else list(context._initial_metadata),
-                    trailing_metadata=list(context._trailing_metadata),
+                front = self._front
+                assert front is not None
+                _answer(
+                    lambda: front.respond(
+                        call.call_id,
+                        data,
+                        initial_metadata=None
+                        if context._initial_metadata is None
+                        else list(context._initial_metadata),
+                        trailing_metadata=list(context._trailing_metadata),
+                    )
                 )
         finally:
             self._calls.pop(call.call_id, None)
@@ -866,7 +959,7 @@ class Server(_Codec, _Methods, grpc.Server):
             ok, request = self._request(call, payload)
             if not ok:
                 return
-            context = _Context(front, call)
+            context = _Context(front, call, self._auth_context)
             try:
                 if call.handler.response_streaming:
                     responses = call.handler.unary_stream(request, context)
@@ -896,8 +989,10 @@ class Server(_Codec, _Methods, grpc.Server):
             if context._code not in (None, grpc.StatusCode.OK):
                 self._fail(call, context, grpc.StatusCode.UNKNOWN, "")
             else:
-                front.stream_end(
-                    call.call_id, trailing_metadata=list(context._trailing_metadata)
+                _answer(
+                    lambda: front.stream_end(
+                        call.call_id, trailing_metadata=list(context._trailing_metadata)
+                    )
                 )
         finally:
             close = getattr(responses, "close", None)
