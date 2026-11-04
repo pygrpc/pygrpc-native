@@ -223,18 +223,19 @@ covered in [docs/low-level-api.md](https://github.com/pygrpc/pygrpc-native/blob/
 </p>
 
 An empty unary handler on an Apple M4 Pro, called by grpcio clients on the
-same machine. Calls per second, median of three runs:
+same machine, with pygrpc-native 0.8.0 and grpcio 1.85.1. Calls per second,
+median of five runs:
 
 | Server | 1 client thread | 32 client threads (8 processes x 4) |
 |:--|--:|--:|
-| `grpc.server()` | 7,739 | 10,955 |
-| `grpc.aio.server()` | 4,804 | 10,322 |
-| `pygrpc_native.server()` | 11,428 | 57,419 |
-| `pygrpc_native.aio.server()` | 9,444 | 58,073 |
-| Low-level API | 12,835 | 63,413 |
+| `grpc.server()` | 7,449 | 11,192 |
+| `grpc.aio.server()` | 4,766 | 10,214 |
+| `pygrpc_native.server()` | 10,790 | 56,834 |
+| `pygrpc_native.aio.server()` | 9,736 | 60,869 |
+| Low-level API | 12,191 | 62,664 |
 
-On a 40-vCPU Linux container, the low-level API answered about 12x as many
-calls as grpcio at 32 threads. The [benchmark README](https://github.com/pygrpc/pygrpc-native/blob/main/benchmarks/README.md)
+On a 40-vCPU Linux container with pygrpc-native 0.1.0, the low-level API
+answered about 12x as many calls as grpcio at 32 threads. The [benchmark README](https://github.com/pygrpc/pygrpc-native/blob/main/benchmarks/README.md)
 has all the numbers and explains how they were measured.
 
 ## Limitations
