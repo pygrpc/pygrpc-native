@@ -24,6 +24,8 @@ from pygrpc_native._native import (
 _LOGGER = logging.getLogger(__name__)
 
 _Metadatum = collections.namedtuple("_Metadatum", ("key", "value"))
+# private key, certificate chain, root certificates, require_client_auth
+_Tls = tuple[bytes, bytes, bytes | None, bool]
 
 
 class _HandlerCallDetails(
@@ -39,6 +41,10 @@ _NO_DEADLINE = float(sys.maxsize)
 _AUTH_CONTEXT = {
     "transport_security_type": [b"insecure"],
     "security_level": [b"TSI_SECURITY_NONE"],
+}
+_TLS_AUTH_CONTEXT = {
+    "transport_security_type": [b"ssl"],
+    "security_level": [b"TSI_PRIVACY_AND_INTEGRITY"],
 }
 
 # Options a grpcio server acts on in ways clients notice, which this server
@@ -190,17 +196,75 @@ def _use_handler(
     return True
 
 
+class _SslServerCredentials(grpc.ServerCredentials):
+    """grpcio's credentials, which also work on a grpcio server, with the PEM
+    data the native front needs: grpcio's own object doesn't give it back."""
+
+    def __init__(self, credentials: grpc.ServerCredentials, tls: _Tls) -> None:
+        super().__init__(credentials._credentials)
+        self.tls = tls
+
+
+def ssl_server_credentials(
+    private_key_certificate_chain_pairs: Iterable[tuple[bytes, bytes]],
+    root_certificates: bytes | None = None,
+    require_client_auth: bool = False,
+) -> grpc.ServerCredentials:
+    """Like `grpc.ssl_server_credentials()`, for `add_secure_port()` on
+    `server()` and `aio.server()`. Takes one key and certificate chain."""
+    pairs = list(private_key_certificate_chain_pairs)
+    credentials = grpc.ssl_server_credentials(
+        pairs, root_certificates, require_client_auth
+    )
+    if len(pairs) > 1:
+        raise NotImplementedError("only one key and certificate chain is supported")
+    key, chain = pairs[0]
+    return _SslServerCredentials(
+        credentials, (key, chain, root_certificates, require_client_auth)
+    )
+
+
+def _tls_of(credentials: grpc.ServerCredentials) -> _Tls:
+    if not isinstance(credentials, _SslServerCredentials):
+        raise NotImplementedError(
+            "add_secure_port() needs pygrpc_native.ssl_server_credentials(): "
+            "the certificates in grpc.ssl_server_credentials() can't be read back"
+        )
+    return credentials.tls
+
+
 class _Methods:
     """The methods a server serves natively: `_table` holds
     `(path, registered handler, server streaming)` by method id, with None for
     a method only generic handlers know, which is looked up on every call."""
 
     _front: NativeGrpcFront | None
+    _auth_context: dict[str, list[bytes]]
+    _io_threads: int
+    _front_args: dict[str, Any]
     _registered: dict[str, grpc.RpcMethodHandler]
     _generic: list[grpc.GenericRpcHandler]
     _table: list[tuple[str, grpc.RpcMethodHandler | None, bool]]
     # Paths answered for good: their method id, or None for the fallback.
     _resolved: dict[str, int | None]
+
+    def _add_port(self, address: str, tls: _Tls | None) -> int:
+        if self._front is not None:
+            raise RuntimeError("only one port is supported")
+        try:
+            self._front = NativeGrpcFront(
+                address,
+                [],
+                io_threads=self._io_threads,
+                call_details=True,
+                delay_stream_headers=True,
+                tls=tls,
+                **self._front_args,
+            )
+        except OSError as exc:
+            raise RuntimeError(f"Failed to bind to address {address}") from exc
+        self._auth_context = _AUTH_CONTEXT if tls is None else _TLS_AUTH_CONTEXT
+        return self._front.bound_port
 
     def _lookup(self, details: grpc.HandlerCallDetails) -> grpc.RpcMethodHandler | None:
         for generic in self._generic:
@@ -385,9 +449,15 @@ class _Call:
 
 
 class _Context(grpc.ServicerContext):
-    def __init__(self, front: NativeGrpcFront, call: _Call) -> None:
+    def __init__(
+        self,
+        front: NativeGrpcFront,
+        call: _Call,
+        auth_context: dict[str, list[bytes]],
+    ) -> None:
         self._front = front
         self._call = call
+        self._auth_context = auth_context
         self._code: grpc.StatusCode | None = None
         self._details: str | None = None
         self._initial_metadata: Sequence[tuple[str, str | bytes]] | None = None
@@ -407,7 +477,7 @@ class _Context(grpc.ServicerContext):
         return None
 
     def auth_context(self) -> dict[str, list[bytes]]:
-        return _AUTH_CONTEXT
+        return self._auth_context
 
     def is_active(self) -> bool:
         return self._call.active
@@ -592,32 +662,19 @@ class Server(_Codec, _Methods, grpc.Server):
             self._registered[f"/{service_name}/{name}"] = handler
 
     def add_insecure_port(self, address: str) -> int:
-        if self._front is not None:
-            raise RuntimeError("only one port is supported")
-        try:
-            self._front = NativeGrpcFront(
-                address,
-                [],
-                io_threads=self._io_threads,
-                call_details=True,
-                delay_stream_headers=True,
-                **self._front_args,
-            )
-        except OSError as exc:
-            raise RuntimeError(f"Failed to bind to address {address}") from exc
-        return self._front.bound_port
+        return self._add_port(address, None)
 
     def add_secure_port(
         self, address: str, server_credentials: grpc.ServerCredentials
     ) -> int:
-        raise NotImplementedError("TLS isn't supported yet")
+        return self._add_port(address, _tls_of(server_credentials))
 
     def start(self) -> None:
         with self._lock:
             if self._started:
                 raise ValueError("Cannot start already-started server!")
             if self._front is None:
-                raise RuntimeError("add a port with add_insecure_port() before start()")
+                raise RuntimeError("add a port before start()")
             native, streamed, generic = _split_handlers(
                 self._registered, self._generic_handlers
             )
@@ -834,7 +891,7 @@ class Server(_Codec, _Methods, grpc.Server):
             ok, request = self._request(call, payload)
             if not ok:
                 return
-            context = _Context(self._front, call)  # type: ignore[arg-type]
+            context = _Context(self._front, call, self._auth_context)  # type: ignore[arg-type]
             try:
                 response = call.handler.unary_unary(request, context)
             except _Abort:
@@ -881,7 +938,7 @@ class Server(_Codec, _Methods, grpc.Server):
             ok, request = self._request(call, payload)
             if not ok:
                 return
-            context = _Context(front, call)
+            context = _Context(front, call, self._auth_context)
             try:
                 if call.handler.response_streaming:
                     responses = call.handler.unary_stream(request, context)

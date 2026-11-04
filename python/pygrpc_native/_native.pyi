@@ -44,6 +44,7 @@ class NativeGrpcFront:
         max_metadata_size: int = 16384,
         reuse_port: bool = False,
         ordered: bool = False,
+        tls: tuple[bytes, bytes, bytes | None, bool] | None = None,
     ) -> None: ...
     @property
     def bound_port(self) -> int: ...

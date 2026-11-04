@@ -75,6 +75,15 @@ For `grpc.aio`:
  await server.wait_for_termination()
 ```
 
+For TLS, make the credentials with `pygrpc_native` too, since grpcio's can't
+be read back:
+
+```diff
+-creds = grpc.ssl_server_credentials([(key, cert)])
++creds = pygrpc_native.ssl_server_credentials([(key, cert)])
+ server.add_secure_port("[::]:50051", creds)
+```
+
 For runnable sync and asyncio servers with a grpcio client, see
 [examples/README.md](https://github.com/pygrpc/pygrpc-native/blob/main/examples/README.md).
 
@@ -114,7 +123,7 @@ this and run your handlers the way grpcio does.
 
 The fallback is a grpcio server listening on a Unix socket behind this one.
 Calls that go there work but aren't any faster, and `peer()` in them returns
-the socket. The native server listens on a single insecure port.
+the socket. The native server listens on a single port.
 
 <details>
 <summary><b>Server options</b></summary>
@@ -124,7 +133,7 @@ the socket. The native server listens on a single insecure port.
 | | Options |
 |:--|:--|
 | Same as grpcio | `grpc.max_receive_message_length`, `grpc.max_send_message_length`, `grpc.keepalive_time_ms`, `grpc.keepalive_timeout_ms`, `grpc.keepalive_permit_without_calls`, `grpc.max_concurrent_streams`, `grpc.max_metadata_size`, `grpc.absolute_max_metadata_size`, `grpc.so_reuseport`, `maximum_concurrent_rpcs` |
-| Raise an error | `grpc.max_connection_age_ms`, `grpc.max_connection_age_grace_ms`, `grpc.max_connection_idle_ms`, `grpc.max_allowed_incoming_connections`, response compression, TLS, `xds=True` |
+| Raise an error | `grpc.max_connection_age_ms`, `grpc.max_connection_age_grace_ms`, `grpc.max_connection_idle_ms`, `grpc.max_allowed_incoming_connections`, response compression, `xds=True` |
 | Ignored | Everything else. grpcio also ignores the many options that only clients read. This includes the limits on client pings, which are accepted but not enforced, and `grpc.http2.max_frame_size`, which grpc-core's flow control overrides anyway. |
 
 As in grpcio, a value that isn't an integer is ignored.
@@ -216,8 +225,16 @@ has all the numbers and explains how they were measured.
 - `NativeGrpcFront` only serves unary and server-streaming methods. Other
   kinds can go through the fallback server, and `server()` and `aio.server()`
   send them there for you.
-- There's no TLS yet. `NativeGrpcFront` checks bearer tokens itself, while
-  `server()` and `aio.server()` run grpcio interceptors.
+- `NativeGrpcFront` checks bearer tokens itself, while `server()` and
+  `aio.server()` run grpcio interceptors.
+- TLS takes one key and certificate chain, and credentials made by
+  `pygrpc_native.ssl_server_credentials()`. Certificates can't be replaced
+  while the server runs.
+- Over TLS, `auth_context()` has the security type and level but not the
+  client's certificate, and `peer_identities()` returns None. Methods on the
+  fallback see an insecure local connection.
+- rustls checks certificates more strictly than grpcio. For example, it
+  refuses a client certificate that's marked as a CA.
 - As with grpc-core, binding a Unix socket path replaces any socket file
   already there.
 - `SO_REUSEPORT` is set only when `grpc.so_reuseport` is 1. grpcio sets it by

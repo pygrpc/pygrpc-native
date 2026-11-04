@@ -51,8 +51,12 @@ const STREAM_PARKED: u8 = 3;
 struct Running {
     runtime: Runtime,
     listeners: Vec<Listener>,
+    tls: Option<tokio_rustls::TlsAcceptor>,
     shutdown: watch::Sender<bool>,
 }
+
+/// The `tls` argument of `NativeGrpcFront`.
+type TlsArgs = (Vec<u8>, Vec<u8>, Option<Vec<u8>>, bool);
 
 /// A gRPC server whose calls are answered from Python by call id.
 ///
@@ -99,12 +103,16 @@ struct Running {
 ///     ordered: Hand a connection's calls to Python in the order the client
 ///         started them. Each call waits until the ones before it have
 ///         arrived in full or ended.
+///     tls: Serve over TLS: ``(private_key, certificate_chain,
+///         root_certificates, require_client_auth)``, all PEM bytes but the
+///         last. ``root_certificates`` may be None unless client certificates
+///         are required. None serves plaintext.
 ///
 /// Raises:
 ///     OSError: If the address cannot be bound.
 ///     ValueError: If ``client_key_metadata`` is not a valid metadata key,
 ///         ``bearer_token_sha256`` is empty or has a digest that isn't 32 bytes,
-///         or a keepalive time is 0.
+///         a keepalive time is 0, or ``tls`` can't be used.
 #[pyclass(module = "pygrpc_native", frozen)]
 struct NativeGrpcFront {
     shared: Arc<Shared>,
@@ -135,6 +143,7 @@ impl NativeGrpcFront {
         max_metadata_size=16384,
         reuse_port=false,
         ordered=false,
+        tls=None,
     ))]
     // Python keyword arguments.
     #[allow(clippy::too_many_arguments)]
@@ -155,6 +164,7 @@ impl NativeGrpcFront {
         max_metadata_size: u32,
         reuse_port: bool,
         ordered: bool,
+        tls: Option<TlsArgs>,
     ) -> PyResult<Self> {
         if io_threads == 0 {
             return Err(PyValueError::new_err("io_threads must be greater than 0"));
@@ -198,6 +208,12 @@ impl NativeGrpcFront {
                 Some(BearerAuth::new(digests, unauthenticated_message.to_owned()))
             }
         };
+        let tls = tls
+            .map(|(key, chain, root, require_client_auth)| {
+                server::tls::acceptor(&key, &chain, root.as_deref(), require_client_auth)
+            })
+            .transpose()
+            .map_err(|err| PyValueError::new_err(format!("invalid tls: {err}")))?;
         let os_error = |err: std::io::Error| {
             PyOSError::new_err((err.raw_os_error().unwrap_or(0), format!("{target}: {err}")))
         };
@@ -242,6 +258,7 @@ impl NativeGrpcFront {
                 runtime,
                 listeners,
                 shutdown,
+                tls,
             })),
             bound_port: bound.port,
             socket_path: bound.socket_path,
@@ -335,6 +352,7 @@ impl NativeGrpcFront {
                 listener,
                 self.shared.clone(),
                 running.shutdown.subscribe(),
+                running.tls.clone(),
             ));
         }
         Ok(())

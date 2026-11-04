@@ -25,6 +25,6 @@ Fixes go into the latest release only. Please upgrade to get them.
 
 ## Scope
 
-pygrpc-native has no TLS or authentication yet, so keep it on localhost or a
-private network. Crashes, memory corruption or unbounded memory use caused by
+TLS is off unless you set it up, so without it keep the server on localhost or
+a private network. Crashes, memory corruption or unbounded memory use caused by
 a single client are still in scope.

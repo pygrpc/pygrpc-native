@@ -12,6 +12,7 @@ mod fallback;
 mod listener;
 mod order;
 mod stream;
+pub(crate) mod tls;
 
 // SPDX-License-Identifier: Apache-2.0
 

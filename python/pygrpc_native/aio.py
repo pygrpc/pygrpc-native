@@ -22,7 +22,6 @@ from pygrpc_native._native import (
     NativeGrpcFront,
 )
 from pygrpc_native._server import (
-    _AUTH_CONTEXT,
     _LIMIT_EXCEEDED,
     _NO_DEADLINE,
     _Codec,
@@ -37,6 +36,7 @@ from pygrpc_native._server import (
     _Methods,
     _parse_options,
     _split_handlers,
+    _tls_of,
     _use_handler,
     _with_behavior,
 )
@@ -213,7 +213,7 @@ class _Context(aio.ServicerContext):
         return None
 
     def auth_context(self) -> dict[str, list[bytes]]:
-        return _AUTH_CONTEXT
+        return self._server._auth_context
 
     def time_remaining(self) -> float:
         if self._call.deadline is None:
@@ -444,25 +444,12 @@ class Server(_Codec, _Methods, aio.Server):
             self._registered[f"/{service_name}/{name}"] = handler
 
     def add_insecure_port(self, address: str) -> int:
-        if self._front is not None:
-            raise RuntimeError("only one port is supported")
-        try:
-            self._front = NativeGrpcFront(
-                address,
-                [],
-                io_threads=self._io_threads,
-                call_details=True,
-                delay_stream_headers=True,
-                **self._front_args,
-            )
-        except OSError as exc:
-            raise RuntimeError(f"Failed to bind to address {address}") from exc
-        return self._front.bound_port
+        return self._add_port(address, None)
 
     def add_secure_port(
         self, address: str, server_credentials: grpc.ServerCredentials
     ) -> int:
-        raise NotImplementedError("TLS isn't supported yet")
+        return self._add_port(address, _tls_of(server_credentials))
 
     async def start(self) -> None:
         if self._stopping:
@@ -470,7 +457,7 @@ class Server(_Codec, _Methods, aio.Server):
         if self._started:
             return
         if self._front is None:
-            raise RuntimeError("add a port with add_insecure_port() before start()")
+            raise RuntimeError("add a port before start()")
         self._started = True
         self._loop = asyncio.get_running_loop()
         native, streamed, generic = _split_handlers(
