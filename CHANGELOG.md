@@ -4,6 +4,30 @@ All notable changes are listed here. The project follows
 [semantic versioning](https://semver.org); see
 [Compatibility](README.md#compatibility) for what that covers.
 
+## 0.8.0 (2026-11-04)
+
+### Added
+
+- `add_secure_port()` works on `server()` and `aio.server()`, with credentials
+  from the new `pygrpc_native.ssl_server_credentials()`, and `NativeGrpcFront`
+  takes a `tls` argument. Building from the sdist now needs a C compiler. (#134)
+- `auth_context()`, `peer_identities()` and `peer_identity_key()` show the
+  client's certificate, as in grpcio. `NativeGrpcFront` users get a `PeerAuth`
+  in the call details. (#136)
+
+### Changed
+
+- ASCII `bytes` values on keys that don't end in `-bin` are accepted and sent
+  as text, as in grpcio. (#126)
+
+### Fixed
+
+- A response with invalid metadata now fails the call with `INTERNAL` instead
+  of leaving the client hanging. (#126)
+- `aio.server()` raises `grpc.aio.UsageError` where grpc.aio does: on a second
+  `send_initial_metadata()` and on `start()` after `stop()`. `start()` on a
+  running server now does nothing. (#129)
+
 ## 0.7.2 (2026-11-03)
 
 ### Changed
