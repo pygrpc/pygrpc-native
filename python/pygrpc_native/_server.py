@@ -76,13 +76,19 @@ def _code(code: grpc.StatusCode) -> int:
     return grpc.StatusCode.UNKNOWN.value[0]
 
 
-def _answer(send: Callable[[], object]) -> None:
-    # For metadata it can't send, the front has already ended the call with
-    # INTERNAL, as grpcio does.
+def _answer(front: NativeGrpcFront, call_id: int, send: Callable[[], object]) -> None:
+    # A status the front can't send must still end the call, or the client
+    # waits for its deadline. This does nothing if the front already ended it.
     try:
         send()
-    except ValueError as exc:
-        _LOGGER.error("Invalid response metadata: %s", exc)
+    except Exception as exc:
+        _LOGGER.error("Invalid response status: %s", exc)
+        front.fail(call_id, _code(grpc.StatusCode.INTERNAL), "Invalid response status")
+
+
+def _text(details: str | bytes) -> str:
+    # grpc.server() takes bytes here too.
+    return details.decode("utf-8", "replace") if isinstance(details, bytes) else details
 
 
 def _limit(value: int) -> int | None:
@@ -531,18 +537,18 @@ class _Context(grpc.ServicerContext):
             self._initial_metadata = initial_metadata
 
     def set_trailing_metadata(
-        self, trailing_metadata: Sequence[tuple[str, str | bytes]]
+        self, trailing_metadata: Sequence[tuple[str, str | bytes]] | None
     ) -> None:
-        self._trailing_metadata = trailing_metadata
+        self._trailing_metadata = trailing_metadata or ()
 
     def trailing_metadata(self) -> Sequence[tuple[str, str | bytes]]:
         return self._trailing_metadata
 
-    def abort(self, code: grpc.StatusCode, details: str) -> None:
+    def abort(self, code: grpc.StatusCode, details: str | bytes) -> None:
         if code == grpc.StatusCode.OK:
             _LOGGER.error("abort() called with StatusCode.OK; returning UNKNOWN")
             code, details = grpc.StatusCode.UNKNOWN, ""
-        self._code, self._details = code, details
+        self._code, self._details = code, _text(details)
         raise _Abort()
 
     def abort_with_status(self, status: grpc.Status) -> None:
@@ -555,8 +561,8 @@ class _Context(grpc.ServicerContext):
     def code(self) -> grpc.StatusCode | None:
         return self._code
 
-    def set_details(self, details: str) -> None:
-        self._details = details
+    def set_details(self, details: str | bytes) -> None:
+        self._details = _text(details)
 
     def details(self) -> str | None:
         return self._details
@@ -892,12 +898,14 @@ class Server(_Codec, _Methods, grpc.Server):
             code = grpc.StatusCode.UNKNOWN
         details = details if context._details is None else context._details
         _answer(
+            front,
+            call.call_id,
             lambda: front.fail(
                 call.call_id,
                 _code(code),
                 details,
                 trailing_metadata=list(context._trailing_metadata),
-            )
+            ),
         )
 
     def _run_unary(self, call: _Call, payload: bytes) -> None:
@@ -931,6 +939,8 @@ class Server(_Codec, _Methods, grpc.Server):
                 front = self._front
                 assert front is not None
                 _answer(
+                    front,
+                    call.call_id,
                     lambda: front.respond(
                         call.call_id,
                         data,
@@ -938,7 +948,7 @@ class Server(_Codec, _Methods, grpc.Server):
                         if context._initial_metadata is None
                         else list(context._initial_metadata),
                         trailing_metadata=list(context._trailing_metadata),
-                    )
+                    ),
                 )
         finally:
             self._calls.pop(call.call_id, None)
@@ -986,9 +996,11 @@ class Server(_Codec, _Methods, grpc.Server):
                 self._fail(call, context, grpc.StatusCode.UNKNOWN, "")
             else:
                 _answer(
+                    front,
+                    call.call_id,
                     lambda: front.stream_end(
                         call.call_id, trailing_metadata=list(context._trailing_metadata)
-                    )
+                    ),
                 )
         finally:
             close = getattr(responses, "close", None)
