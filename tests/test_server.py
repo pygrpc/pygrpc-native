@@ -527,3 +527,52 @@ def test_a_client_that_stops_reading_stops_the_handler() -> None:
             call.cancel()
     finally:
         server.stop(None)
+
+
+def _details_bytes(request: Any, context: grpc.ServicerContext) -> Any:
+    context.set_code(grpc.StatusCode.NOT_FOUND)
+    context.set_details(b"missing")
+    return request
+
+
+def test_set_details_takes_bytes(pb: tuple[Any, Any], kind: str) -> None:
+    assert _unary(pb, kind, _details_bytes)[:2] == (
+        grpc.StatusCode.NOT_FOUND,
+        "missing",
+    )
+
+
+def _trailing_none(request: Any, context: grpc.ServicerContext) -> Any:
+    context.set_trailing_metadata(None)
+    return request
+
+
+def test_set_trailing_metadata_takes_none(pb: tuple[Any, Any], kind: str) -> None:
+    assert _unary(pb, kind, _trailing_none)[:2] == ("OK", "x")
+
+
+def _details_int(request: Any, context: grpc.ServicerContext) -> Any:
+    context.set_code(grpc.StatusCode.NOT_FOUND)
+    context.set_details(5)  # type: ignore[arg-type]
+    return request
+
+
+def _trailing_int(request: Any, context: grpc.ServicerContext) -> Any:
+    context.set_trailing_metadata(5)  # type: ignore[arg-type]
+    return request
+
+
+def _trailing_short(request: Any, context: grpc.ServicerContext) -> Any:
+    context.set_trailing_metadata([("k",)])  # type: ignore[list-item]
+    return request
+
+
+@pytest.mark.parametrize("behavior", [_details_int, _trailing_int, _trailing_short])
+def test_a_status_that_cant_be_sent_ends_the_call(
+    pb: tuple[Any, Any], behavior: Behavior
+) -> None:
+    def stream(request: Any, context: grpc.ServicerContext) -> Iterator[Any]:
+        yield behavior(request, context)
+
+    assert _unary(pb, "native", behavior)[0] == grpc.StatusCode.INTERNAL
+    assert _stream(pb, "native", stream)[:2] == (["x"], grpc.StatusCode.INTERNAL)
