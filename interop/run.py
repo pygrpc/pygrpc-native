@@ -171,6 +171,10 @@ def compare(results: dict) -> list[str]:
     for security in SECURITY:
         for mode in MODES:
             for client in CLIENTS:
+                # A client that can't connect fails on both servers, which would
+                # otherwise look like no difference.
+                if not results[f"{security}/grpcio/{mode}/{client}/empty_unary"]["ok"]:
+                    problems.append(f"{security}/{mode}/{client}: fails on grpcio")
                 for case in CASES:
                     name = f"{security}/{mode}/{client}/{case}"
                     base = results[f"{security}/grpcio/{mode}/{client}/{case}"]

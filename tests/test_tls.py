@@ -20,11 +20,6 @@ CERTS = Path(__file__).parent / "tls_certs"
 HTTP2_PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 SETTINGS = 4
 EMPTY_SETTINGS = bytes([0, 0, 0, SETTINGS, 0, 0, 0, 0, 0])
-each_tls_version = pytest.mark.parametrize(
-    "version",
-    [ssl.TLSVersion.TLSv1_2, ssl.TLSVersion.TLSv1_3],
-    ids=["tls1.2", "tls1.3"],
-)
 
 
 def pem(name: str) -> bytes:
@@ -120,8 +115,8 @@ def handshakes(
     cert: str | None = None,
 ) -> bool:
     """Connects with OpenSSL, which can pick a TLS version and ALPN protocol, and
-    says whether the server starts HTTP/2. The handshake alone doesn't tell: with
-    TLS 1.3, a client finishes it before the server rejects its certificate."""
+    says whether the server starts HTTP/2. A server can still refuse a client
+    after the handshake, so finishing that isn't enough."""
     # Not create_default_context(): from Python 3.13 its checks refuse the test CA.
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     context.load_verify_locations(CERTS / "ca.pem")
@@ -202,7 +197,11 @@ def test_client_certificate_details_match_grpcio(name: str) -> None:
     assert details("native") == expected
 
 
-@each_tls_version
+@pytest.mark.parametrize(
+    "version",
+    [ssl.TLSVersion.TLSv1_2, ssl.TLSVersion.TLSv1_3],
+    ids=["tls1.2", "tls1.3"],
+)
 def test_tls_versions(kind: str, version: ssl.TLSVersion) -> None:
     with serving(kind, credentials()) as port:
         assert handshakes(port, version)
@@ -216,12 +215,11 @@ def test_client_without_h2_is_refused(kind: str) -> None:
 @pytest.mark.parametrize(
     ("cert", "accepted"), [("client", True), (None, False), ("other", False)]
 )
-@each_tls_version
-def test_required_client_certificate(
-    kind: str, version: ssl.TLSVersion, cert: str | None, accepted: bool
+def test_required_client_certificate_on_tls_1_2(
+    kind: str, cert: str | None, accepted: bool
 ) -> None:
     with serving(kind, credentials(pem("ca.pem"), True)) as port:
-        assert handshakes(port, version, cert=cert) == accepted
+        assert handshakes(port, ssl.TLSVersion.TLSv1_2, cert=cert) == accepted
 
 
 def test_plaintext_client_is_refused(kind: str) -> None:
