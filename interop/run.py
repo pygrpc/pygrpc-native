@@ -1,6 +1,6 @@
 """Runs the gRPC interop cases with grpc-go's and grpcio's clients against grpcio
-and pygrpc-native servers. A case that passes on grpcio has to pass on
-pygrpc-native too, unless expected_diffs.toml lists it.
+and pygrpc-native servers, with and without TLS. A case that passes on grpcio
+has to pass on pygrpc-native too, unless expected_diffs.toml lists it.
 
     python interop/run.py --go-client PATH [--table table.md]
 """
@@ -15,6 +15,7 @@ import tomllib
 from pathlib import Path
 
 HERE = Path(__file__).parent
+CA = HERE.parent / "tests" / "tls_certs" / "ca.pem"
 CASE_TIMEOUT = 20
 
 # Client-streaming and bidi methods go to the grpcio fallback server.
@@ -36,6 +37,7 @@ CASES = {
 }
 MODES = ["sync", "aio"]
 CLIENTS = ["go", "python"]
+SECURITY = ["insecure", "tls"]
 
 
 def _free_port() -> int:
@@ -59,19 +61,33 @@ def _wait_ready(port: int, server: subprocess.Popen, log: Path) -> None:
     raise RuntimeError("server did not start")
 
 
-def _client_command(client: str, go_client: str, port: int, case: str) -> list[str]:
+def _client_command(
+    client: str, go_client: str, port: int, case: str, security: str
+) -> list[str]:
+    tls = security == "tls"
     if client == "go":
         return [
             go_client,
             "-server_host=127.0.0.1",
             f"-server_port={port}",
             f"-test_case={case}",
+            *(
+                [
+                    "-use_tls",
+                    "-use_test_ca",
+                    f"-ca_file={CA}",
+                    "-server_host_override=localhost",
+                ]
+                if tls
+                else []
+            ),
         ]
     return [
         sys.executable,
         str(HERE / "python_client.py"),
         f"--port={port}",
         f"--test_case={case}",
+        *([f"--ca={CA}"] if tls else []),
     ]
 
 
@@ -93,48 +109,57 @@ def _run_case(command: list[str]) -> dict:
 
 def run(go_client: str) -> dict:
     results: dict = {}
-    for impl in ["grpcio", "native"]:
-        for mode in MODES:
-            port = _free_port()
-            log = Path(
-                tempfile.mkstemp(prefix=f"interop-{impl}-{mode}-", suffix=".log")[1]
-            )
-            with open(log, "wb") as out:
-                server = subprocess.Popen(
-                    [
-                        sys.executable,
-                        str(HERE / "server.py"),
-                        f"--impl={impl}",
-                        f"--mode={mode}",
-                        f"--port={port}",
-                    ],
-                    stdout=out,
-                    stderr=subprocess.STDOUT,
-                )
-            try:
-                _wait_ready(port, server, log)
-                for client in CLIENTS:
-                    for case in CASES:
-                        result = _run_case(
-                            _client_command(client, go_client, port, case)
-                        )
-                        results[f"{impl}/{mode}/{client}/{case}"] = result
-                        print(
-                            f"{impl:6} {mode:4} {client:6} {case:28} {'ok' if result['ok'] else 'FAIL'}",
-                            flush=True,
-                        )
-            finally:
-                server.kill()
-                server.wait()
+    for security in SECURITY:
+        for impl in ["grpcio", "native"]:
+            for mode in MODES:
+                _run_server(go_client, security, impl, mode, results)
     return results
+
+
+def _run_server(
+    go_client: str, security: str, impl: str, mode: str, results: dict
+) -> None:
+    port = _free_port()
+    log = Path(
+        tempfile.mkstemp(prefix=f"interop-{impl}-{mode}-{security}-", suffix=".log")[1]
+    )
+    with open(log, "wb") as out:
+        server = subprocess.Popen(
+            [
+                sys.executable,
+                str(HERE / "server.py"),
+                f"--impl={impl}",
+                f"--mode={mode}",
+                f"--port={port}",
+                *(["--tls"] if security == "tls" else []),
+            ],
+            stdout=out,
+            stderr=subprocess.STDOUT,
+        )
+    try:
+        _wait_ready(port, server, log)
+        for client in CLIENTS:
+            for case in CASES:
+                result = _run_case(
+                    _client_command(client, go_client, port, case, security)
+                )
+                results[f"{security}/{impl}/{mode}/{client}/{case}"] = result
+                print(
+                    f"{security:8} {impl:6} {mode:4} {client:6} {case:28} {'ok' if result['ok'] else 'FAIL'}",
+                    flush=True,
+                )
+    finally:
+        server.kill()
+        server.wait()
 
 
 def _expected_diffs() -> dict:
     with open(HERE / "expected_diffs.toml", "rb") as f:
         diffs = tomllib.load(f).get("diff", [])
     return {
-        (mode, client, d["case"]): d
+        (security, mode, client, d["case"]): d
         for d in diffs
+        for security in d.get("security", SECURITY)
         for mode in d.get("modes", MODES)
         for client in d.get("clients", CLIENTS)
     }
@@ -143,27 +168,35 @@ def _expected_diffs() -> dict:
 def compare(results: dict) -> list[str]:
     expected = _expected_diffs()
     problems = []
-    for mode in MODES:
-        for client in CLIENTS:
-            for case in CASES:
-                base = results[f"grpcio/{mode}/{client}/{case}"]
-                native = results[f"native/{mode}/{client}/{case}"]
-                differs = base["ok"] and not native["ok"]
-                listed = (mode, client, case) in expected
-                if differs and not listed:
-                    problems.append(
-                        f"{mode}/{client}/{case}: fails on pygrpc-native: {native['error']}"
-                    )
-                elif listed and not differs:
-                    problems.append(
-                        f"{mode}/{client}/{case}: listed in expected_diffs.toml but no longer differs"
-                    )
+    for security in SECURITY:
+        for mode in MODES:
+            for client in CLIENTS:
+                for case in CASES:
+                    name = f"{security}/{mode}/{client}/{case}"
+                    base = results[f"{security}/grpcio/{mode}/{client}/{case}"]
+                    native = results[f"{security}/native/{mode}/{client}/{case}"]
+                    differs = base["ok"] and not native["ok"]
+                    listed = (security, mode, client, case) in expected
+                    if differs and not listed:
+                        problems.append(
+                            f"{name}: fails on pygrpc-native: {native['error']}"
+                        )
+                    elif listed and not differs:
+                        problems.append(
+                            f"{name}: listed in expected_diffs.toml but no longer differs"
+                        )
     return problems
 
 
 def table(results: dict) -> str:
+    return "\n".join(_table(results, security) for security in SECURITY)
+
+
+def _table(results: dict, security: str) -> str:
     expected = _expected_diffs()
     lines = [
+        f"### {security}",
+        "",
         "| Case | Path | "
         + " | ".join(f"{c} client, {m}" for c in CLIENTS for m in MODES)
         + " |",
@@ -173,14 +206,16 @@ def table(results: dict) -> str:
         cells = []
         for client in CLIENTS:
             for mode in MODES:
-                base = results[f"grpcio/{mode}/{client}/{case}"]["ok"]
-                native = results[f"native/{mode}/{client}/{case}"]["ok"]
+                base = results[f"{security}/grpcio/{mode}/{client}/{case}"]["ok"]
+                native = results[f"{security}/native/{mode}/{client}/{case}"]["ok"]
                 if native:
                     cells.append("pass")
                 elif not base:
                     cells.append("fails on grpcio too")
                 else:
-                    issue = expected.get((mode, client, case), {}).get("issue")
+                    issue = expected.get((security, mode, client, case), {}).get(
+                        "issue"
+                    )
                     cells.append(f"fail (#{issue})" if issue else "fail")
         lines.append(f"| `{case}` | {path} | " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"
