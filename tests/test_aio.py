@@ -989,3 +989,40 @@ def test_a_server_whose_loop_closes_without_stop_stops_serving() -> None:
         with pytest.raises(grpc.RpcError) as info:
             channel.unary_unary("/t.S/U")(b"x", timeout=10)
     assert info.value.code() == grpc.StatusCode.UNAVAILABLE
+
+
+async def _details_bytes(request: Any, context: aio.ServicerContext) -> Any:
+    context.set_code(grpc.StatusCode.NOT_FOUND)
+    context.set_details(b"missing")  # type: ignore[arg-type]
+    return request
+
+
+async def _details_int(request: Any, context: aio.ServicerContext) -> Any:
+    context.set_code(grpc.StatusCode.NOT_FOUND)
+    context.set_details(5)  # type: ignore[arg-type]
+    return request
+
+
+async def _trailing_int(request: Any, context: aio.ServicerContext) -> Any:
+    context.set_trailing_metadata(5)  # type: ignore[arg-type]
+    return request
+
+
+async def _trailing_short(request: Any, context: aio.ServicerContext) -> Any:
+    context.set_trailing_metadata([("k",)])  # type: ignore[list-item]
+    return request
+
+
+@pytest.mark.parametrize(
+    "behavior", [_details_bytes, _details_int, _trailing_int, _trailing_short]
+)
+def test_a_status_that_cant_be_sent_ends_the_call(
+    pb: tuple[Any, Any], behavior: Behavior
+) -> None:
+    async def stream(request: Any, context: aio.ServicerContext) -> AsyncIterator[Any]:
+        yield await behavior(request, context)
+
+    outcome = asyncio.run(_unary(pb, "native", behavior))
+    assert outcome[0] == grpc.StatusCode.INTERNAL
+    outcome = asyncio.run(_stream(pb, "native", stream))
+    assert outcome[:2] == (["x"], grpc.StatusCode.INTERNAL)

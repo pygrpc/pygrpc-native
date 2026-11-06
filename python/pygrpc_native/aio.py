@@ -692,18 +692,22 @@ class Server(_Codec, _Methods, aio.Server):
         assert front is not None
         if code == grpc.StatusCode.OK:
             _answer(
+                front,
+                call.call_id,
                 lambda: front.stream_end(
                     call.call_id, trailing_metadata=list(trailing_metadata)
-                )
+                ),
             )
         else:
             _answer(
+                front,
+                call.call_id,
                 lambda: front.fail(
                     call.call_id,
                     _code(code),
                     details,
                     trailing_metadata=list(trailing_metadata),
-                )
+                ),
             )
 
     def _failed(self, call: _Call, context: _Context, exc: Exception) -> None:
@@ -745,6 +749,8 @@ class Server(_Codec, _Methods, aio.Server):
             front = self._front
             assert front is not None
             _answer(
+                front,
+                call.call_id,
                 lambda: front.respond(
                     call.call_id,
                     data,
@@ -752,7 +758,7 @@ class Server(_Codec, _Methods, aio.Server):
                     if context._initial_metadata is None
                     else list(context._initial_metadata),
                     trailing_metadata=list(context._trailing_metadata),
-                )
+                ),
             )
 
     async def _run_stream(self, call: _Call, context: _Context, request: Any) -> None:
