@@ -1,11 +1,12 @@
 """Serves the interop TestService on grpcio or pygrpc-native.
 
-python interop/server.py --impl grpcio|native --mode sync|aio --port PORT
+python interop/server.py --impl grpcio|native --mode sync|aio --port PORT [--tls]
 """
 
 import argparse
 import asyncio
 from concurrent import futures
+from pathlib import Path
 
 import grpc
 from grpc import aio
@@ -17,6 +18,8 @@ _protos.load()
 from src.proto.grpc.testing import test_pb2_grpc  # noqa: E402
 
 from service import AsyncTestService, TestService  # noqa: E402
+
+CERTS = Path(__file__).parent.parent / "tests" / "tls_certs"
 
 
 def _make_server(impl: str, mode: str):
@@ -34,18 +37,32 @@ def _make_server(impl: str, mode: str):
     return pygrpc_native.aio.server()
 
 
+def _credentials(impl: str) -> grpc.ServerCredentials:
+    pair = ((CERTS / "server.key").read_bytes(), (CERTS / "server.pem").read_bytes())
+    if impl == "grpcio":
+        return grpc.ssl_server_credentials([pair])
+    import pygrpc_native
+
+    return pygrpc_native.ssl_server_credentials([pair])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--impl", choices=["grpcio", "native"], required=True)
     parser.add_argument("--mode", choices=["sync", "aio"], required=True)
     parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--tls", action="store_true")
     args = parser.parse_args()
 
     def build():
         server = _make_server(args.impl, args.mode)
         service = TestService() if args.mode == "sync" else AsyncTestService()
         test_pb2_grpc.add_TestServiceServicer_to_server(service, server)
-        server.add_insecure_port(f"127.0.0.1:{args.port}")
+        address = f"127.0.0.1:{args.port}"
+        if args.tls:
+            server.add_secure_port(address, _credentials(args.impl))
+        else:
+            server.add_insecure_port(address)
         return server
 
     if args.mode == "sync":

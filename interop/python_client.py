@@ -414,13 +414,25 @@ CASES = {
 }
 
 
+def _channel(port: int, ca: str | None) -> grpc.Channel:
+    address = f"127.0.0.1:{port}"
+    if ca is None:
+        return grpc.insecure_channel(address)
+    with open(ca, "rb") as f:
+        credentials = grpc.ssl_channel_credentials(f.read())
+    # The test certificate is for localhost.
+    options = (("grpc.ssl_target_name_override", "localhost"),)
+    return grpc.secure_channel(address, credentials, options=options)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--test_case", required=True)
+    parser.add_argument("--ca", help="use TLS and trust this CA")
     args = parser.parse_args()
 
-    with grpc.insecure_channel(f"127.0.0.1:{args.port}") as channel:
+    with _channel(args.port, args.ca) as channel:
         if args.test_case == "unimplemented_service":
             _unimplemented_service(test_pb2_grpc.UnimplementedServiceStub(channel))
         else:

@@ -1,6 +1,8 @@
 """TLS on `server()` and `aio.server()`, with grpcio's server as the reference."""
 
 import asyncio
+import socket
+import ssl
 from collections.abc import AsyncIterator, Iterator
 from concurrent import futures
 from contextlib import contextmanager
@@ -15,6 +17,9 @@ import pygrpc_native
 import pygrpc_native.aio
 
 CERTS = Path(__file__).parent / "tls_certs"
+HTTP2_PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+SETTINGS = 4
+EMPTY_SETTINGS = bytes([0, 0, 0, SETTINGS, 0, 0, 0, 0, 0])
 
 
 def pem(name: str) -> bytes:
@@ -103,6 +108,34 @@ def client(port: int, key: str | None = None, cert: str | None = None) -> grpc.C
     )
 
 
+def handshakes(
+    port: int,
+    version: ssl.TLSVersion,
+    alpn: str = "h2",
+    cert: str | None = None,
+) -> bool:
+    """Connects with OpenSSL, which can pick a TLS version and ALPN protocol, and
+    says whether the server starts HTTP/2. A server can still refuse a client
+    after the handshake, so finishing that isn't enough."""
+    # Not create_default_context(): from Python 3.13 its checks refuse the test CA.
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.load_verify_locations(CERTS / "ca.pem")
+    context.minimum_version = context.maximum_version = version
+    context.set_alpn_protocols([alpn])
+    if cert:
+        context.load_cert_chain(CERTS / f"{cert}.pem", CERTS / f"{cert}.key")
+    try:
+        with (
+            socket.create_connection(("localhost", port), timeout=5) as raw,
+            context.wrap_socket(raw, server_hostname="localhost") as connection,
+        ):
+            connection.sendall(HTTP2_PREFACE + EMPTY_SETTINGS)
+            frame = connection.recv(9)
+    except (ssl.SSLError, ConnectionError):
+        return False
+    return len(frame) == 9 and frame[3] == SETTINGS
+
+
 @pytest.fixture(params=["grpcio", "native"])
 def kind(request: pytest.FixtureRequest) -> str:
     return request.param
@@ -162,6 +195,31 @@ def test_client_certificate_details_match_grpcio(name: str) -> None:
     expected = details("grpcio")
     assert b"x509_pem_cert" in expected[0]
     assert details("native") == expected
+
+
+@pytest.mark.parametrize(
+    "version",
+    [ssl.TLSVersion.TLSv1_2, ssl.TLSVersion.TLSv1_3],
+    ids=["tls1.2", "tls1.3"],
+)
+def test_tls_versions(kind: str, version: ssl.TLSVersion) -> None:
+    with serving(kind, credentials()) as port:
+        assert handshakes(port, version)
+
+
+def test_client_without_h2_is_refused(kind: str) -> None:
+    with serving(kind, credentials()) as port:
+        assert not handshakes(port, ssl.TLSVersion.TLSv1_3, alpn="http/1.1")
+
+
+@pytest.mark.parametrize(
+    ("cert", "accepted"), [("client", True), (None, False), ("other", False)]
+)
+def test_required_client_certificate_on_tls_1_2(
+    kind: str, cert: str | None, accepted: bool
+) -> None:
+    with serving(kind, credentials(pem("ca.pem"), True)) as port:
+        assert handshakes(port, ssl.TLSVersion.TLSv1_2, cert=cert) == accepted
 
 
 def test_plaintext_client_is_refused(kind: str) -> None:
