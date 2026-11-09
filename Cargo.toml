@@ -20,7 +20,7 @@ default = ["extension-module"]
 extension-module = ["pyo3/extension-module"]
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
 bytes = "1.9"
 crossbeam-channel = "0.5"
 futures-core = "0.3"
