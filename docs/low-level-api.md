@@ -66,7 +66,10 @@ before `start()`, so the port can be bound before the methods are known.
 Metadata is a list of `(key, value)` pairs with lowercase keys. Values are
 `str` or ASCII `bytes`, or any `bytes` for keys ending in `-bin`. If a method
 can't send the metadata it was given, it raises `ValueError` and ends the call
-with `INTERNAL`, as grpcio does.
+with `INTERNAL`, as grpcio does. Any other argument that `respond`, `fail`,
+`stream_send_initial_metadata` or `stream_end` can't use, such as a message
+with a lone surrogate, which can't be encoded as UTF-8, ends the call with
+`INTERNAL` the same way before the error is raised.
 
 `recv_batch` returns `(kind, call_id, method_id, payload, client_key)`
 tuples. `kind` is `EVENT_CALL` for a new call and `EVENT_CANCEL` when the

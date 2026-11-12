@@ -464,20 +464,20 @@ impl NativeGrpcFront {
     fn respond(
         &self,
         call_id: u64,
-        payload: PyBackedBytes,
-        initial_metadata: Option<Vec<(String, Bound<'_, PyAny>)>>,
-        trailing_metadata: Option<Vec<(String, Bound<'_, PyAny>)>>,
+        payload: &Bound<'_, PyAny>,
+        initial_metadata: Option<&Bound<'_, PyAny>>,
+        trailing_metadata: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<bool> {
+        let payload = payload
+            .extract::<PyBackedBytes>()
+            .map_err(|err| self.reject(call_id, err.into(), "Invalid response"))?;
         let answer = Answer {
             payload: Bytes::from_owner(payload),
-            initial_metadata: initial_metadata
-                .map(metadata_map)
-                .transpose()
+            initial_metadata: optional_metadata(initial_metadata)
                 .map_err(|err| self.reject_metadata(call_id, err))?,
-            trailing_metadata: trailing_metadata
-                .map(|items| metadata_map(items).map(MetadataMap::into_headers))
-                .transpose()
-                .map_err(|err| self.reject_metadata(call_id, err))?,
+            trailing_metadata: optional_metadata(trailing_metadata)
+                .map_err(|err| self.reject_metadata(call_id, err))?
+                .map(MetadataMap::into_headers),
         };
         Ok(self.shared.respond(call_id, Ok(answer)))
     }
@@ -488,21 +488,29 @@ impl NativeGrpcFront {
     /// Returns False if the call no longer exists.
     ///
     /// Raises:
-    ///     ValueError: If ``code`` is 0 (OK).
+    ///     ValueError: If ``code`` is 0 (OK). The call still ends, with
+    ///         ``INTERNAL``, as it does for any argument that can't be used.
     #[pyo3(signature = (call_id, code, message, trailing_metadata=None))]
     fn fail(
         &self,
         call_id: u64,
-        code: i32,
-        message: &str,
-        trailing_metadata: Option<Vec<(String, Bound<'_, PyAny>)>>,
+        code: &Bound<'_, PyAny>,
+        message: &Bound<'_, PyAny>,
+        trailing_metadata: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<bool> {
+        let status = |err| self.reject(call_id, err, "Invalid response status");
+        let code: i32 = code.extract().map_err(status)?;
         if code == 0 {
-            return Err(PyValueError::new_err(
+            return Err(status(PyValueError::new_err(
                 "fail() needs a non-OK status; use respond() or stream_end()",
-            ));
+            )));
         }
-        let mut items = trailing_metadata.unwrap_or_default();
+        let message: String = message.extract().map_err(status)?;
+        let mut items: Vec<(String, Bound<'_, PyAny>)> = trailing_metadata
+            .map(|items| items.extract())
+            .transpose()
+            .map_err(|err| self.reject_metadata(call_id, err))?
+            .unwrap_or_default();
         // grpcio's abort_with_status() sends the rich status this way.
         let details = match items.iter().position(|(key, _)| key == STATUS_DETAILS_KEY) {
             Some(i) => {
@@ -576,9 +584,12 @@ impl NativeGrpcFront {
     fn stream_send_initial_metadata(
         &self,
         call_id: u64,
-        metadata: Vec<(String, Bound<'_, PyAny>)>,
+        metadata: &Bound<'_, PyAny>,
     ) -> PyResult<bool> {
-        let metadata = metadata_map(metadata).map_err(|err| self.reject_metadata(call_id, err))?;
+        let metadata = metadata
+            .extract()
+            .and_then(metadata_map)
+            .map_err(|err| self.reject_metadata(call_id, err))?;
         Ok(self.shared.send_initial_metadata(call_id, metadata))
     }
 
@@ -587,12 +598,11 @@ impl NativeGrpcFront {
     fn stream_end(
         &self,
         call_id: u64,
-        trailing_metadata: Option<Vec<(String, Bound<'_, PyAny>)>>,
+        trailing_metadata: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
-        let status = trailing_metadata
-            .map(|items| metadata_map(items).map(|md| Status::with_metadata(Code::Ok, "", md)))
-            .transpose()
-            .map_err(|err| self.reject_metadata(call_id, err))?;
+        let status = optional_metadata(trailing_metadata)
+            .map_err(|err| self.reject_metadata(call_id, err))?
+            .map(|md| Status::with_metadata(Code::Ok, "", md));
         self.shared.end_stream(call_id, status);
         Ok(())
     }
@@ -693,7 +703,11 @@ impl NativeGrpcFront {
     /// Ends the call as grpcio does when it can't send the metadata, so the
     /// client isn't left waiting, and hands the error back to the caller.
     fn reject_metadata(&self, call_id: u64, err: PyErr) -> PyErr {
-        self.end_call(call_id, Status::internal("Invalid metadata"));
+        self.reject(call_id, err, "Invalid metadata")
+    }
+
+    fn reject(&self, call_id: u64, err: PyErr, message: &str) -> PyErr {
+        self.end_call(call_id, Status::internal(message));
         err
     }
 }
@@ -759,6 +773,12 @@ impl NativeGrpcFront {
 }
 
 const STATUS_DETAILS_KEY: &str = "grpc-status-details-bin";
+
+fn optional_metadata(items: Option<&Bound<'_, PyAny>>) -> PyResult<Option<MetadataMap>> {
+    items
+        .map(|items| items.extract().and_then(metadata_map))
+        .transpose()
+}
 
 fn metadata_map(items: Vec<(String, Bound<'_, PyAny>)>) -> PyResult<MetadataMap> {
     let mut metadata = MetadataMap::with_capacity(items.len());
