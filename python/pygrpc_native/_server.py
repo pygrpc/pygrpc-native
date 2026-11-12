@@ -913,6 +913,9 @@ class Server(_Codec, _Methods, grpc.Server):
             if not self._intercept(call):
                 self._release(call)
                 return
+            # Like grpcio, a call that ended while queued skips the handler, not the interceptors.
+            if not call.active:
+                return
             ok, request = self._request(call, payload)
             if not ok:
                 return
@@ -961,6 +964,8 @@ class Server(_Codec, _Methods, grpc.Server):
         try:
             if not self._intercept(call):
                 self._release(call)
+                return
+            if not call.active:
                 return
             ok, request = self._request(call, payload)
             if not ok:

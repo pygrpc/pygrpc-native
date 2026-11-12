@@ -332,6 +332,42 @@ def test_client_cancel_runs_callbacks(pb: tuple[Any, Any], kind: str) -> None:
     assert seen == {"registered": True, "active": False, "late": False}
 
 
+def test_handler_doesnt_run_once_the_client_gave_up(
+    pb: tuple[Any, Any], kind: str
+) -> None:
+    t_pb2, t_pb2_grpc = pb
+    release = threading.Event()
+    ran: list[str] = []
+
+    def handler(request: Any, context: grpc.ServicerContext) -> Any:
+        ran.append(request.s)
+        release.wait(10)
+        return request
+
+    server, port = _serve(pb, kind, unary=handler)
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{port}") as channel:
+            stub = t_pb2_grpc.SStub(channel)
+            # Takes all 8 workers, so the next call waits in the queue.
+            busy = [
+                stub.Unary.future(t_pb2.Msg(s="busy"), timeout=10) for _ in range(8)
+            ]
+            deadline = time.monotonic() + 5
+            while len(ran) < 8 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            late = stub.Unary.future(t_pb2.Msg(s="late"), timeout=0.5)
+            assert late.exception(5).code() is grpc.StatusCode.DEADLINE_EXCEEDED
+            # The client can see the deadline pass a little before the server.
+            time.sleep(0.5)
+            release.set()
+            for call in busy:
+                call.result(5)
+            time.sleep(0.2)
+    finally:
+        server.stop(None)
+    assert ran == ["busy"] * 8
+
+
 def test_initial_metadata_twice_is_rejected(pb: tuple[Any, Any], kind: str) -> None:
     errors = []
 

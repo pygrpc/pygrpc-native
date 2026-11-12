@@ -82,7 +82,10 @@ in order without the transport headers, with `-bin` values as bytes, the peer
 as `ipv4:host:port`, and the seconds left before the deadline or `None`.
 Without it the sixth item is `None`, and nothing extra is collected per call.
 The option also sends `EVENT_CANCEL` for a unary call that ends before it is
-answered, as grpcio lets a handler see through `is_active()`.
+answered, as grpcio lets a handler see through `is_active()`. A call is
+delivered even if its client leaves before you get to it. If you queue calls
+for workers and want to skip ones nobody is waiting for any more, use this
+event; `server()` does that for you.
 
 A stream sends its response headers as soon as the call starts. With
 `delay_stream_headers=True` they wait, as in grpcio, for the first message or
