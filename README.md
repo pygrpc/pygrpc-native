@@ -155,9 +155,6 @@ As in grpcio, a value that isn't an integer is ignored.
   call that sets one ends with `INTERNAL`. grpcio sends them.
 - A response metadata value with non-ASCII text on a key without `-bin` is
   sent as is. grpcio ends that call with `INTERNAL`.
-- A request over `grpc.max_receive_message_length` is refused before it
-  reaches Python, so interceptors don't see the call. The client gets the
-  same `RESOURCE_EXHAUSTED` as from grpcio.
 
 </details>
 
