@@ -129,3 +129,50 @@ def test_invalid_metadata_still_ends_the_call() -> None:
         "Invalid metadata",
     )
     assert len(errors) == 1
+
+
+@pytest.mark.parametrize(
+    ("answer", "streaming", "details"),
+    [
+        (lambda f, c: f.fail(c, 2, "k-\udcff"), False, "Invalid response status"),
+        (lambda f, c: f.fail(c, 2**40, "m"), False, "Invalid response status"),
+        (lambda f, c: f.fail(c, 0, "m"), False, "Invalid response status"),
+        (lambda f, c: f.respond(c, "text"), False, "Invalid response"),
+        (
+            lambda f, c: f.fail(c, 2, "m", trailing_metadata=5),
+            False,
+            "Invalid metadata",
+        ),
+        (
+            lambda f, c: f.respond(c, b"", trailing_metadata=[("k-\udcff", "v")]),
+            False,
+            "Invalid metadata",
+        ),
+        (
+            lambda f, c: f.stream_end(c, trailing_metadata=[("k",)]),
+            True,
+            "Invalid metadata",
+        ),
+        (lambda f, c: f.stream_send_initial_metadata(c, 5), True, "Invalid metadata"),
+    ],
+)
+def test_arguments_that_cant_be_converted_still_end_the_call(
+    answer: Callable[[NativeGrpcFront, int], object], streaming: bool, details: str
+) -> None:
+    errors: list[Exception] = []
+
+    def run(front: NativeGrpcFront, call_id: int, payload: bytes) -> None:
+        try:
+            answer(front, call_id)
+        except (TypeError, ValueError, OverflowError) as exc:
+            errors.append(exc)
+
+    with serving(run, streaming) as channel:
+        with pytest.raises(grpc.RpcError) as info:
+            if streaming:
+                list(channel.unary_stream("/t.S/M")(b"x", timeout=5))
+            else:
+                channel.unary_unary("/t.S/M")(b"x", timeout=5)
+    error = cast(grpc.Call, info.value)
+    assert (error.code(), error.details()) == (grpc.StatusCode.INTERNAL, details)
+    assert len(errors) == 1
