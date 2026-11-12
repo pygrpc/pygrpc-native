@@ -132,6 +132,11 @@ type TlsArgs = (Vec<u8>, Vec<u8>, Option<Vec<u8>>, bool);
 ///         root_certificates, require_client_auth)``, all PEM bytes but the
 ///         last. ``root_certificates`` may be None unless client certificates
 ///         are required. None serves plaintext.
+///     max_receive_message_length: The largest request message a native
+///         method takes, in bytes, as sent (compressed or not). A call with
+///         a larger message ends with RESOURCE_EXHAUSTED as soon as its
+///         length prefix arrives, without reading the rest of it. Calls to
+///         the fallback aren't checked. None (the default) has no limit.
 ///
 /// Raises:
 ///     OSError: If the address cannot be bound.
@@ -169,6 +174,7 @@ impl NativeGrpcFront {
         reuse_port=false,
         ordered=false,
         tls=None,
+        max_receive_message_length=None,
     ))]
     // Python keyword arguments.
     #[allow(clippy::too_many_arguments)]
@@ -190,6 +196,7 @@ impl NativeGrpcFront {
         reuse_port: bool,
         ordered: bool,
         tls: Option<TlsArgs>,
+        max_receive_message_length: Option<usize>,
     ) -> PyResult<Self> {
         if io_threads == 0 {
             return Err(PyValueError::new_err("io_threads must be greater than 0"));
@@ -273,6 +280,7 @@ impl NativeGrpcFront {
                     keepalive,
                     max_concurrent_streams,
                     max_metadata_size,
+                    max_receive_message_length,
                 },
                 metrics.then_some(io_threads),
                 ordered,

@@ -53,6 +53,8 @@ pub struct ConnectionSettings {
     pub max_concurrent_streams: u32,
     /// The largest header list a request may have.
     pub max_metadata_size: u32,
+    /// The largest request message to a native method, as sent.
+    pub max_receive_message_length: Option<usize>,
 }
 
 /// When the server pings a connection to check that the client is still

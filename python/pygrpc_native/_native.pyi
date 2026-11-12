@@ -53,6 +53,7 @@ class NativeGrpcFront:
         reuse_port: bool = False,
         ordered: bool = False,
         tls: tuple[bytes, bytes, bytes | None, bool] | None = None,
+        max_receive_message_length: int | None = None,
     ) -> None: ...
     @property
     def bound_port(self) -> int: ...

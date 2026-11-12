@@ -88,6 +88,10 @@ async fn route(
     if let Some(call) = call {
         call.start(Some(method_id));
     }
+    request.body_mut().limit = shared
+        .connection
+        .max_receive_message_length
+        .map(MessageLimit::new);
     let sizes = call.map(|call| call.sizes.clone());
     let response = async {
         if streaming {
@@ -170,6 +174,7 @@ pub(super) async fn serve_stream(
         recv,
         data_done: false,
         sizes: call.as_ref().map(|call| call.sizes.clone()),
+        limit: None,
     });
     let route = route(shared, peer, fallback, request, call.as_ref());
     tokio::pin!(route);
@@ -411,16 +416,68 @@ pub(crate) struct RequestBody {
     recv: h2::RecvStream,
     data_done: bool,
     sizes: Option<Arc<CallSizes>>,
+    limit: Option<MessageLimit>,
+}
+
+const HEADER_LEN: usize = GRPC_HEADER_LEN as usize;
+
+/// Checks each message's length prefix as it arrives, so a message over the
+/// limit is refused before it is read.
+struct MessageLimit {
+    max: usize,
+    header: [u8; HEADER_LEN],
+    header_read: usize,
+    body_left: usize,
+}
+
+impl MessageLimit {
+    fn new(max: usize) -> Self {
+        MessageLimit {
+            max,
+            header: [0; HEADER_LEN],
+            header_read: 0,
+            body_left: 0,
+        }
+    }
+
+    fn check(&mut self, mut data: &[u8]) -> Result<(), Status> {
+        while !data.is_empty() {
+            if self.body_left > 0 {
+                let n = self.body_left.min(data.len());
+                self.body_left -= n;
+                data = &data[n..];
+                continue;
+            }
+            let n = (HEADER_LEN - self.header_read).min(data.len());
+            self.header[self.header_read..self.header_read + n].copy_from_slice(&data[..n]);
+            self.header_read += n;
+            data = &data[n..];
+            if self.header_read < HEADER_LEN {
+                break;
+            }
+            self.header_read = 0;
+            let len = u32::from_be_bytes(self.header[1..].try_into().unwrap()) as usize;
+            // Compressed or not, as grpcio checks it.
+            if len > self.max {
+                return Err(Status::resource_exhausted(format!(
+                    "SERVER: Received message larger than max ({len} vs. {})",
+                    self.max
+                )));
+            }
+            self.body_left = len;
+        }
+        Ok(())
+    }
 }
 
 impl http_body::Body for RequestBody {
     type Data = Bytes;
-    type Error = h2::Error;
+    type Error = Box<dyn std::error::Error + Send + Sync>;
 
     fn poll_frame(
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<Frame<Bytes>, h2::Error>>> {
+    ) -> Poll<Option<Result<Frame<Bytes>, Self::Error>>> {
         if !self.data_done {
             match self.recv.poll_data(cx) {
                 Poll::Ready(Some(Ok(data))) => {
@@ -430,9 +487,14 @@ impl http_body::Body for RequestBody {
                             .received
                             .fetch_add(data.len() as u64, Ordering::Relaxed);
                     }
+                    if let Some(limit) = &mut self.limit {
+                        if let Err(status) = limit.check(&data) {
+                            return Poll::Ready(Some(Err(status.into())));
+                        }
+                    }
                     return Poll::Ready(Some(Ok(Frame::data(data))));
                 }
-                Poll::Ready(Some(Err(err))) => return Poll::Ready(Some(Err(err))),
+                Poll::Ready(Some(Err(err))) => return Poll::Ready(Some(Err(err.into()))),
                 Poll::Ready(None) => self.data_done = true,
                 Poll::Pending => return Poll::Pending,
             }
@@ -440,7 +502,7 @@ impl http_body::Body for RequestBody {
         match self.recv.poll_trailers(cx) {
             Poll::Ready(Ok(Some(trailers))) => Poll::Ready(Some(Ok(Frame::trailers(trailers)))),
             Poll::Ready(Ok(None)) => Poll::Ready(None),
-            Poll::Ready(Err(err)) => Poll::Ready(Some(Err(err))),
+            Poll::Ready(Err(err)) => Poll::Ready(Some(Err(err.into()))),
             Poll::Pending => Poll::Pending,
         }
     }

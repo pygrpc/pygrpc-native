@@ -141,6 +141,9 @@ def _parse_options(
         if hard_metadata < 0:
             hard_metadata = max(int(soft_metadata * 1.25), _DEFAULT_METADATA_LIMIT)
         front["max_metadata_size"] = min(hard_metadata, 2**32 - 1)
+    # The front refuses a message from its length prefix; _request() also
+    # checks a compressed one once it is decompressed.
+    front["max_receive_message_length"] = receive
     return receive, send, front
 
 
