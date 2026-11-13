@@ -522,6 +522,50 @@ def test_stop_with_grace(pb: tuple[Any, Any], kind: str) -> None:
     assert code in (grpc.StatusCode.CANCELLED, grpc.StatusCode.UNAVAILABLE)
 
 
+def test_stopping_server_sends_new_calls_elsewhere(pb: tuple[Any, Any]) -> None:
+    a_pb2, a_pb2_grpc = pb
+
+    async def run() -> None:
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def slow(request: Any, context: aio.ServicerContext) -> Any:
+            if request.s == "slow":
+                started.set()
+                await release.wait()
+            return request
+
+        a, port_a = await _serve(pb, "native", unary=slow)
+        b, port_b = await _serve(pb, "native")
+        options = [
+            ("grpc.lb_policy_name", "round_robin"),
+            ("grpc.default_authority", "localhost"),
+        ]
+        target = f"ipv4:127.0.0.1:{port_a},127.0.0.1:{port_b}"
+        try:
+            async with aio.insecure_channel(target, options=options) as channel:
+                stub = a_pb2_grpc.SStub(channel)
+                for _ in range(10):
+                    await stub.Unary(a_pb2.Msg(s="x"), timeout=5)
+                async with aio.insecure_channel(f"127.0.0.1:{port_a}") as direct:
+                    running = asyncio.ensure_future(
+                        a_pb2_grpc.SStub(direct).Unary(a_pb2.Msg(s="slow"), timeout=10)
+                    )
+                    await asyncio.wait_for(started.wait(), 5)
+                    stopping = asyncio.ensure_future(a.stop(10))
+                    for _ in range(50):
+                        reply = await stub.Unary(a_pb2.Msg(s="x"), timeout=5)
+                        assert reply.s == "x"
+                    release.set()
+                    assert (await running).s == "slow"
+                    await asyncio.wait_for(stopping, 5)
+        finally:
+            release.set()
+            await a.stop(None)
+            await b.stop(None)
+
+    asyncio.run(run())
+
+
 def test_reflection_and_health(pb: tuple[Any, Any]) -> None:
     reflection = pytest.importorskip("grpc_reflection.v1alpha.reflection")
     reflection_pb2 = pytest.importorskip("grpc_reflection.v1alpha.reflection_pb2")
