@@ -43,6 +43,7 @@ const EVENT_CALL: u8 = 0;
 const EVENT_CANCEL: u8 = 1;
 const EVENT_RESOLVE: u8 = 2;
 const EVENT_WRITABLE: u8 = 3;
+const EVENT_REFUSED: u8 = 4;
 const STREAM_SENT: u8 = 0;
 const STREAM_FULL: u8 = 1;
 const STREAM_CLOSED: u8 = 2;
@@ -339,6 +340,18 @@ impl NativeGrpcFront {
     #[pyo3(name = "_resolve_unknown_methods")]
     fn resolve_unknown_methods(&self) -> PyResult<()> {
         if self.shared.resolve_unknown_methods() {
+            Ok(())
+        } else {
+            Err(PyRuntimeError::new_err("server already started"))
+        }
+    }
+
+    /// Internal to ``server()`` and ``aio.server()``: send _EVENT_REFUSED
+    /// (call id, method id) with the call's details when a call is refused
+    /// for its message size, so interceptors still see it. Before ``start()``.
+    #[pyo3(name = "_report_refused_calls")]
+    fn report_refused_calls(&self) -> PyResult<()> {
+        if self.shared.report_refused_calls() {
             Ok(())
         } else {
             Err(PyRuntimeError::new_err("server already started"))
@@ -852,6 +865,9 @@ fn event_tuple<'py>(py: Python<'py>, event: Event) -> PyResult<Bound<'py, PyTupl
         Event::Resolve {
             resolve_id, path, ..
         } => (EVENT_RESOLVE, resolve_id, 0u32, path, py.None()).into_pyobject(py),
+        Event::Refused {
+            call_id, method_id, ..
+        } => (EVENT_REFUSED, call_id, method_id, py.None(), py.None()).into_pyobject(py),
         Event::Writable { call_id, sent } => {
             (EVENT_WRITABLE, call_id, 0u32, sent, py.None()).into_pyobject(py)
         }
@@ -866,6 +882,10 @@ fn event_details_tuple<'py>(py: Python<'py>, event: Event) -> PyResult<Bound<'py
             ..
         }
         | Event::Resolve {
+            details: Some(details),
+            ..
+        }
+        | Event::Refused {
             details: Some(details),
             ..
         } => details_tuple(py, details)?.into_any(),
@@ -1021,6 +1041,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("_EVENT_RESOLVE", EVENT_RESOLVE)?;
     m.add("_MAX_RESOLVED", MAX_RESOLVED)?;
     m.add("_EVENT_WRITABLE", EVENT_WRITABLE)?;
+    m.add("_EVENT_REFUSED", EVENT_REFUSED)?;
     m.add("_STREAM_PARKED", STREAM_PARKED)?;
     m.add("STREAM_SENT", STREAM_SENT)?;
     m.add("STREAM_FULL", STREAM_FULL)?;

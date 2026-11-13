@@ -112,6 +112,12 @@ pub enum Event {
         call_id: u64,
         sent: bool,
     },
+    /// A call refused for its message size; see `report_refused_calls`.
+    Refused {
+        call_id: u64,
+        method_id: u32,
+        details: Option<Box<CallDetails>>,
+    },
     /// A call to a method not in the table; see `resolve_unknown_methods`.
     Resolve {
         resolve_id: u64,
@@ -181,6 +187,7 @@ pub struct Shared {
     connections_done: Notify,
     fallback: OnceLock<PathBuf>,
     resolve_unknown: AtomicBool,
+    report_refused: AtomicBool,
     resolved: RwLock<HashMap<String, Resolved>>,
     resolving: Mutex<HashMap<u64, Resolving>>,
     client_key_metadata: Option<String>,
@@ -224,6 +231,7 @@ impl Shared {
             connections_done: Notify::new(),
             fallback: OnceLock::new(),
             resolve_unknown: AtomicBool::new(false),
+            report_refused: AtomicBool::new(false),
             resolved: RwLock::new(HashMap::new()),
             resolving: Mutex::new(HashMap::new()),
             client_key_metadata,
@@ -273,6 +281,15 @@ impl Shared {
             return false;
         }
         self.resolve_unknown.store(true, Ordering::Relaxed);
+        true
+    }
+
+    pub fn report_refused_calls(&self) -> bool {
+        let _pending = self.pending_methods.lock().unwrap();
+        if self.methods.get().is_some() {
+            return false;
+        }
+        self.report_refused.store(true, Ordering::Relaxed);
         true
     }
 

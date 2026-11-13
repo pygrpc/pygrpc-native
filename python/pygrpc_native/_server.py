@@ -16,6 +16,7 @@ import grpc
 from pygrpc_native._native import (
     EVENT_CALL,
     EVENT_CANCEL,
+    _EVENT_REFUSED,
     _EVENT_RESOLVE,
     _MAX_RESOLVED,
     NativeGrpcFront,
@@ -711,6 +712,8 @@ class Server(_Codec, _Methods, grpc.Server):
             if generic:
                 self._generic = generic
                 self._front._resolve_unknown_methods()
+            if self._interceptors:
+                self._front._report_refused_calls()
             self._table = [
                 (path, handler, handler.response_streaming)
                 for path, handler in native.items()
@@ -798,6 +801,13 @@ class Server(_Codec, _Methods, grpc.Server):
                         continue
                     if kind == _EVENT_RESOLVE:
                         self._resolve(call_id, payload, details[0])
+                        continue
+                    if kind == _EVENT_REFUSED:
+                        # The front already ended it; grpcio still runs the
+                        # interceptors, as it does before reading the message.
+                        call = _Call(call_id, *self._table[method_id], *details)
+                        call.admitted = False
+                        contextvars.Context().run(self._intercept, call)
                         continue
                     if self._stopping:
                         front.fail(

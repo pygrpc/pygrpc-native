@@ -88,10 +88,23 @@ async fn route(
     if let Some(call) = call {
         call.start(Some(method_id));
     }
-    request.body_mut().limit = shared
-        .connection
-        .max_receive_message_length
-        .map(MessageLimit::new);
+    let mut refusal = None;
+    if let Some(max) = shared.connection.max_receive_message_length {
+        let mut limit = MessageLimit::new(max);
+        if shared.report_refused.load(Ordering::Relaxed) {
+            let refused = Arc::new(AtomicBool::new(false));
+            limit.refused = Some(refused.clone());
+            refusal = Some(Refusal {
+                refused,
+                shared: shared.clone(),
+                peer: peer.clone(),
+                method_id,
+                metadata: tonic::metadata::MetadataMap::from_headers(request.headers().clone()),
+                deadline,
+            });
+        }
+        request.body_mut().limit = Some(limit);
+    }
     let sizes = call.map(|call| call.sizes.clone());
     let response = async {
         if streaming {
@@ -112,11 +125,40 @@ async fn route(
             with_extra_trailers(grpc(sizes).unary(call, request).await)
         }
     };
-    match deadline {
+    let response = match deadline {
         Some(deadline) => tokio::time::timeout_at(deadline, response)
             .await
             .unwrap_or_else(|_| deadline_exceeded().into_http()),
         None => response.await,
+    };
+    if let Some(refusal) = refusal {
+        refusal.report();
+    }
+    response
+}
+
+/// What `server()` needs to run its interceptors for a call refused for its
+/// message size, as grpcio runs them before it reads the message.
+struct Refusal {
+    refused: Arc<AtomicBool>,
+    shared: Arc<Shared>,
+    peer: Arc<Peer>,
+    method_id: u32,
+    metadata: tonic::metadata::MetadataMap,
+    deadline: Option<tokio::time::Instant>,
+}
+
+impl Refusal {
+    fn report(self) {
+        if !self.refused.load(Ordering::Relaxed) {
+            return;
+        }
+        let shared = &self.shared;
+        let _ = shared.events.send(Event::Refused {
+            call_id: shared.next_call_id(),
+            method_id: self.method_id,
+            details: call_details(shared, &self.metadata, &self.peer, self.deadline),
+        });
     }
 }
 
@@ -428,6 +470,7 @@ struct MessageLimit {
     header: [u8; HEADER_LEN],
     header_read: usize,
     body_left: usize,
+    refused: Option<Arc<AtomicBool>>,
 }
 
 impl MessageLimit {
@@ -437,6 +480,7 @@ impl MessageLimit {
             header: [0; HEADER_LEN],
             header_read: 0,
             body_left: 0,
+            refused: None,
         }
     }
 
@@ -459,6 +503,9 @@ impl MessageLimit {
             let len = u32::from_be_bytes(self.header[1..].try_into().unwrap()) as usize;
             // Compressed or not, as grpcio checks it.
             if len > self.max {
+                if let Some(refused) = &self.refused {
+                    refused.store(true, Ordering::Relaxed);
+                }
                 return Err(Status::resource_exhausted(format!(
                     "SERVER: Received message larger than max ({len} vs. {})",
                     self.max
