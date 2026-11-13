@@ -30,9 +30,11 @@ pub async fn accept_loop(
     mut shutdown: watch::Receiver<bool>,
     tls: Option<TlsAcceptor>,
 ) {
+    let mut draining = shared.draining();
     loop {
         let accepted = tokio::select! {
             _ = stopped(&mut shutdown) => return,
+            _ = stopped(&mut draining) => return,
             accepted = accept(&listener) => accepted,
         };
         match accepted {

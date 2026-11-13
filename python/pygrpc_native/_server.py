@@ -675,6 +675,7 @@ class Server(_Codec, _Methods, grpc.Server):
         self._lock = threading.Lock()
         self._started = False
         self._stopping = False
+        self._closing = False
         self._terminated = threading.Event()
 
     def add_generic_rpc_handlers(
@@ -757,6 +758,8 @@ class Server(_Codec, _Methods, grpc.Server):
                 self._shutdown(done)
                 return done
             self._stopping = True
+            if self._front is not None:
+                self._front._drain()
         fallback_done = None if self._fallback is None else self._fallback.stop(grace)
 
         def finish() -> None:
@@ -777,6 +780,7 @@ class Server(_Codec, _Methods, grpc.Server):
         return not self._terminated.wait(timeout)
 
     def _shutdown(self, done: threading.Event) -> None:
+        self._closing = True
         if self._front is not None:
             self._front.close()
         if self._fallback is not None:
@@ -812,7 +816,9 @@ class Server(_Codec, _Methods, grpc.Server):
                             contextvars.Context().run, self._intercept, call
                         )
                         continue
-                    if self._stopping:
+                    # Calls sent before the client saw GOAWAY still run in
+                    # the grace period.
+                    if self._closing:
                         front.fail(
                             call_id,
                             _code(grpc.StatusCode.UNAVAILABLE),
