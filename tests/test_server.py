@@ -280,6 +280,31 @@ def test_message_limits_match_grpcio(pb: tuple[Any, Any]) -> None:
     )
 
 
+def test_interceptors_see_a_call_refused_for_its_size(
+    pb: tuple[Any, Any], kind: str
+) -> None:
+    seen: list[str] = []
+
+    class Record(grpc.ServerInterceptor):
+        def intercept_service(self, continuation: Any, details: Any) -> Any:
+            seen.append(details.method)
+            return continuation(details)
+
+    outcome = _unary(
+        pb,
+        kind,
+        UNARY_CASES["echo"],
+        "x" * 2000,
+        options=[("grpc.max_receive_message_length", 1024)],
+        interceptors=[Record()],
+    )
+    assert outcome[0] == grpc.StatusCode.RESOURCE_EXHAUSTED
+    deadline = time.monotonic() + 5
+    while not seen and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert seen == ["/t.S/Unary"]
+
+
 def test_context_details(pb: tuple[Any, Any], kind: str) -> None:
     seen: dict[str, Any] = {}
 

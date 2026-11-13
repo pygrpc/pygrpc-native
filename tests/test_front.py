@@ -3,6 +3,7 @@
 from collections.abc import Iterator
 from concurrent import futures
 from typing import cast
+import os
 import shutil
 import tempfile
 import threading
@@ -204,3 +205,38 @@ def test_ordered_calls_do_not_wait_on_an_open_forwarded_call() -> None:
         front.close()
         fallback.stop(None)
         shutil.rmtree(directory, ignore_errors=True)
+
+
+def test_message_over_the_receive_limit_never_reaches_python() -> None:
+    front = NativeGrpcFront(
+        "127.0.0.1:0", [("/t.S/U", False)], max_receive_message_length=1024
+    )
+    front.start()
+    seen: list[int] = []
+
+    def serve() -> None:
+        while (events := front.recv_batch(64)) is not None:
+            for _, call_id, _, payload, _ in events:
+                seen.append(len(payload))
+                front.respond(call_id, b"ok")
+
+    threading.Thread(target=serve, daemon=True).start()
+    try:
+        with grpc.insecure_channel(f"127.0.0.1:{front.bound_port}") as channel:
+            call = channel.unary_unary("/t.S/U")
+            with pytest.raises(grpc.RpcError) as info:
+                call(b"x" * 1025, timeout=5)
+            error = cast(grpc.Call, info.value)
+            assert error.code() is grpc.StatusCode.RESOURCE_EXHAUSTED
+            assert error.details() == (
+                "SERVER: Received message larger than max (1025 vs. 1024)"
+            )
+            assert call(b"x" * 1024, timeout=5) == b"ok"
+            # Compressed to about 1.5 KiB, which is what the limit applies to.
+            compressible = bytes(1500) + os.urandom(1500)
+            with pytest.raises(grpc.RpcError) as info:
+                call(compressible, timeout=5, compression=grpc.Compression.Gzip)
+            assert _code(info.value) is grpc.StatusCode.RESOURCE_EXHAUSTED
+    finally:
+        front.close()
+    assert seen == [1024]

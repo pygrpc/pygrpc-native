@@ -43,6 +43,7 @@ const EVENT_CALL: u8 = 0;
 const EVENT_CANCEL: u8 = 1;
 const EVENT_RESOLVE: u8 = 2;
 const EVENT_WRITABLE: u8 = 3;
+const EVENT_REFUSED: u8 = 4;
 const STREAM_SENT: u8 = 0;
 const STREAM_FULL: u8 = 1;
 const STREAM_CLOSED: u8 = 2;
@@ -132,6 +133,11 @@ type TlsArgs = (Vec<u8>, Vec<u8>, Option<Vec<u8>>, bool);
 ///         root_certificates, require_client_auth)``, all PEM bytes but the
 ///         last. ``root_certificates`` may be None unless client certificates
 ///         are required. None serves plaintext.
+///     max_receive_message_length: The largest request message a native
+///         method takes, in bytes, as sent (compressed or not). A call with
+///         a larger message ends with RESOURCE_EXHAUSTED as soon as its
+///         length prefix arrives, without reading the rest of it. Calls to
+///         the fallback aren't checked. None (the default) has no limit.
 ///
 /// Raises:
 ///     OSError: If the address cannot be bound.
@@ -169,6 +175,7 @@ impl NativeGrpcFront {
         reuse_port=false,
         ordered=false,
         tls=None,
+        max_receive_message_length=None,
     ))]
     // Python keyword arguments.
     #[allow(clippy::too_many_arguments)]
@@ -190,6 +197,7 @@ impl NativeGrpcFront {
         reuse_port: bool,
         ordered: bool,
         tls: Option<TlsArgs>,
+        max_receive_message_length: Option<usize>,
     ) -> PyResult<Self> {
         if io_threads == 0 {
             return Err(PyValueError::new_err("io_threads must be greater than 0"));
@@ -273,6 +281,7 @@ impl NativeGrpcFront {
                     keepalive,
                     max_concurrent_streams,
                     max_metadata_size,
+                    max_receive_message_length,
                 },
                 metrics.then_some(io_threads),
                 ordered,
@@ -331,6 +340,18 @@ impl NativeGrpcFront {
     #[pyo3(name = "_resolve_unknown_methods")]
     fn resolve_unknown_methods(&self) -> PyResult<()> {
         if self.shared.resolve_unknown_methods() {
+            Ok(())
+        } else {
+            Err(PyRuntimeError::new_err("server already started"))
+        }
+    }
+
+    /// Internal to ``server()`` and ``aio.server()``: send _EVENT_REFUSED
+    /// (call id, method id) with the call's details when a call is refused
+    /// for its message size, so interceptors still see it. Before ``start()``.
+    #[pyo3(name = "_report_refused_calls")]
+    fn report_refused_calls(&self) -> PyResult<()> {
+        if self.shared.report_refused_calls() {
             Ok(())
         } else {
             Err(PyRuntimeError::new_err("server already started"))
@@ -844,6 +865,9 @@ fn event_tuple<'py>(py: Python<'py>, event: Event) -> PyResult<Bound<'py, PyTupl
         Event::Resolve {
             resolve_id, path, ..
         } => (EVENT_RESOLVE, resolve_id, 0u32, path, py.None()).into_pyobject(py),
+        Event::Refused {
+            call_id, method_id, ..
+        } => (EVENT_REFUSED, call_id, method_id, py.None(), py.None()).into_pyobject(py),
         Event::Writable { call_id, sent } => {
             (EVENT_WRITABLE, call_id, 0u32, sent, py.None()).into_pyobject(py)
         }
@@ -858,6 +882,10 @@ fn event_details_tuple<'py>(py: Python<'py>, event: Event) -> PyResult<Bound<'py
             ..
         }
         | Event::Resolve {
+            details: Some(details),
+            ..
+        }
+        | Event::Refused {
             details: Some(details),
             ..
         } => details_tuple(py, details)?.into_any(),
@@ -1013,6 +1041,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("_EVENT_RESOLVE", EVENT_RESOLVE)?;
     m.add("_MAX_RESOLVED", MAX_RESOLVED)?;
     m.add("_EVENT_WRITABLE", EVENT_WRITABLE)?;
+    m.add("_EVENT_REFUSED", EVENT_REFUSED)?;
     m.add("_STREAM_PARKED", STREAM_PARKED)?;
     m.add("STREAM_SENT", STREAM_SENT)?;
     m.add("STREAM_FULL", STREAM_FULL)?;

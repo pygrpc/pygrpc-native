@@ -38,12 +38,18 @@ pass the serialized reply to `respond`.
 
 ## Reference
 
-`NativeGrpcFront(target, methods, io_threads=2, client_key_metadata=None, call_details=False, delay_stream_headers=False, bearer_token_sha256=None, unauthenticated_message="Unauthenticated", metrics=False, keepalive_time_ms=7200000, keepalive_timeout_ms=20000, keepalive_permit_without_calls=True, max_concurrent_streams=1024, max_metadata_size=16384, reuse_port=False, ordered=False, tls=None)`
+`NativeGrpcFront(target, methods, io_threads=2, client_key_metadata=None, call_details=False, delay_stream_headers=False, bearer_token_sha256=None, unauthenticated_message="Unauthenticated", metrics=False, keepalive_time_ms=7200000, keepalive_timeout_ms=20000, keepalive_permit_without_calls=True, max_concurrent_streams=1024, max_metadata_size=16384, reuse_port=False, ordered=False, tls=None, max_receive_message_length=None)`
 binds `host:port` (every address the host resolves to), `unix:path` or
 `unix:///path`. Port 0 picks a free port. `methods` lists
 `(path, server_streaming)` pairs, where a path is `/package.Service/Method`
 and a method's id is its index in the list. `add_methods` appends more
 before `start()`, so the port can be bound before the methods are known.
+
+Request messages have no size limit unless you set
+`max_receive_message_length`. A call whose message is larger, as sent, then
+ends with `RESOURCE_EXHAUSTED` as soon as its length prefix arrives, and the
+rest of the message isn't read. `server()` and `aio.server()` also check a
+compressed message once it is decompressed, as grpcio does.
 
 | Member | Purpose |
 |---|---|

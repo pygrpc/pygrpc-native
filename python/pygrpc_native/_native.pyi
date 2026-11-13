@@ -9,14 +9,15 @@ EVENT_CANCEL: int
 _EVENT_RESOLVE: int
 _MAX_RESOLVED: int
 _EVENT_WRITABLE: int
+_EVENT_REFUSED: int
 _STREAM_PARKED: int
 STREAM_SENT: int
 STREAM_FULL: int
 STREAM_CLOSED: int
 
 # (kind, call_id, method_id, payload, client_key); payload and client_key are
-# None for EVENT_CANCEL. payload is the method path for _EVENT_RESOLVE, and
-# whether the held message went out for _EVENT_WRITABLE.
+# None for EVENT_CANCEL and _EVENT_REFUSED. payload is the method path for
+# _EVENT_RESOLVE, and whether the held message went out for _EVENT_WRITABLE.
 Event = tuple[int, int, int, bytes | str | bool | None, bytes | str | None]
 
 # (metadata, peer, time_remaining); metadata values are bytes for -bin keys.
@@ -53,12 +54,14 @@ class NativeGrpcFront:
         reuse_port: bool = False,
         ordered: bool = False,
         tls: tuple[bytes, bytes, bytes | None, bool] | None = None,
+        max_receive_message_length: int | None = None,
     ) -> None: ...
     @property
     def bound_port(self) -> int: ...
     def add_methods(self, methods: Sequence[tuple[str, bool]]) -> list[int]: ...
     def set_fallback(self, path: str) -> None: ...
     def _resolve_unknown_methods(self) -> None: ...
+    def _report_refused_calls(self) -> None: ...
     def _wake_fd(self) -> int: ...
     def _poll_batch_details(self, max_events: int) -> list[DetailedEvent] | None: ...
     def _resolved(
