@@ -805,9 +805,12 @@ class Server(_Codec, _Methods, grpc.Server):
                     if kind == _EVENT_REFUSED:
                         # The front already ended it; grpcio still runs the
                         # interceptors, as it does before reading the message.
+                        assert details is not None
                         call = _Call(call_id, *self._table[method_id], *details)
                         call.admitted = False
-                        contextvars.Context().run(self._intercept, call)
+                        self._executor.submit(
+                            contextvars.Context().run, self._intercept, call
+                        )
                         continue
                     if self._stopping:
                         front.fail(

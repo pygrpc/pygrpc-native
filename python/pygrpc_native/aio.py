@@ -428,6 +428,8 @@ class Server(_Codec, _Methods, aio.Server):
         self._table: list[tuple[str, grpc.RpcMethodHandler | None, bool]] = []
         self._resolved: dict[str, int | None] = {}
         self._calls: dict[int, _Call] = {}
+        # Interceptors running for calls the front refused for their size.
+        self._refused: set[asyncio.Task[bool]] = set()
         # Stream messages written during one pass of the event loop, handed
         # to the front together so they go out in as few writes as possible.
         self._pending: list[_Call] = []
@@ -529,7 +531,10 @@ class Server(_Codec, _Methods, aio.Server):
         fallback = None
         if self._fallback is not None:
             fallback = asyncio.ensure_future(self._fallback.stop(grace))
-        tasks = [call.task for call in self._calls.values() if call.task is not None]
+        tasks: list[asyncio.Task[Any]] = [
+            call.task for call in self._calls.values() if call.task is not None
+        ]
+        tasks += self._refused
         if grace and tasks:
             await asyncio.wait(tasks, timeout=grace)
         for task in tasks:
@@ -605,7 +610,9 @@ class Server(_Codec, _Methods, aio.Server):
                 # The front already ended it; grpcio still runs the
                 # interceptors, as it does before reading the message.
                 call = _Call(call_id, *self._table[method_id], *details)
-                loop.create_task(self._intercept(call))
+                task = loop.create_task(self._intercept(call))
+                self._refused.add(task)
+                task.add_done_callback(self._refused.discard)
                 continue
             if self._stopping:
                 front.fail(

@@ -16,8 +16,8 @@ STREAM_FULL: int
 STREAM_CLOSED: int
 
 # (kind, call_id, method_id, payload, client_key); payload and client_key are
-# None for EVENT_CANCEL and _EVENT_REFUSED. payload is the method path for _EVENT_RESOLVE, and
-# whether the held message went out for _EVENT_WRITABLE.
+# None for EVENT_CANCEL and _EVENT_REFUSED. payload is the method path for
+# _EVENT_RESOLVE, and whether the held message went out for _EVENT_WRITABLE.
 Event = tuple[int, int, int, bytes | str | bool | None, bytes | str | None]
 
 # (metadata, peer, time_remaining); metadata values are bytes for -bin keys.
