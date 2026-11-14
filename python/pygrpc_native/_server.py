@@ -430,7 +430,11 @@ def _peer_identity_key(auth: PeerAuth | None) -> str | None:
 def _auth_context(
     auth: PeerAuth | None, default: dict[str, list[bytes]]
 ) -> dict[str, list[bytes]]:
-    return default if auth is None else auth.auth_context()
+    if auth is None:
+        # grpcio gives every call its own dict; hand out a fresh copy of the
+        # defaults so a handler can't leak edits into later calls.
+        return {key: list(values) for key, values in default.items()}
+    return auth.auth_context()
 
 
 class _Call:
