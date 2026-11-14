@@ -330,6 +330,22 @@ def test_context_details(pb: tuple[Any, Any], kind: str) -> None:
     assert seen["peer"].startswith("ipv6:%5B::1%5D:")
 
 
+def test_auth_context_is_fresh_per_call(pb: tuple[Any, Any], kind: str) -> None:
+    seen: dict[str, Any] = {}
+
+    def mutate(request: Any, context: grpc.ServicerContext) -> Any:
+        context.auth_context()["x"] = [b"y"]
+        return request
+
+    def look(request: Any, context: grpc.ServicerContext) -> Any:
+        seen["auth"] = context.auth_context()
+        return request
+
+    assert _unary(pb, kind, mutate)[0] == "OK"
+    assert _unary(pb, kind, look)[0] == "OK"
+    assert "x" not in seen["auth"]
+
+
 def test_client_cancel_runs_callbacks(pb: tuple[Any, Any], kind: str) -> None:
     t_pb2, t_pb2_grpc = pb
     ran = threading.Event()

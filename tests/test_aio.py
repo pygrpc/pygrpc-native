@@ -461,6 +461,22 @@ def test_context_details(pb: tuple[Any, Any], kind: str) -> None:
     assert seen["peer"].startswith("ipv6:%5B::1%5D:")
 
 
+def test_auth_context_is_fresh_per_call(pb: tuple[Any, Any], kind: str) -> None:
+    seen: dict[str, Any] = {}
+
+    async def mutate(request: Any, context: aio.ServicerContext) -> Any:
+        context.auth_context()["x"] = [b"y"]
+        return request
+
+    async def look(request: Any, context: aio.ServicerContext) -> Any:
+        seen["auth"] = context.auth_context()
+        return request
+
+    assert asyncio.run(_unary(pb, kind, mutate))[0] == "OK"
+    assert asyncio.run(_unary(pb, kind, look))[0] == "OK"
+    assert "x" not in seen["auth"]
+
+
 def test_initial_metadata_twice_is_rejected(pb: tuple[Any, Any], kind: str) -> None:
     errors = []
 
