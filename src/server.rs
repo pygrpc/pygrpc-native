@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
 use bytes::Bytes;
-use tokio::sync::{oneshot, Notify};
+use tokio::sync::{oneshot, watch, Notify};
 use tonic::Status;
 
 use crate::metrics::{self, Metrics};
@@ -185,6 +185,7 @@ pub struct Shared {
     closed: AtomicBool,
     connections: AtomicUsize,
     connections_done: Notify,
+    draining: watch::Sender<bool>,
     fallback: OnceLock<PathBuf>,
     resolve_unknown: AtomicBool,
     report_refused: AtomicBool,
@@ -229,6 +230,7 @@ impl Shared {
             closed: AtomicBool::new(false),
             connections: AtomicUsize::new(0),
             connections_done: Notify::new(),
+            draining: watch::Sender::new(false),
             fallback: OnceLock::new(),
             resolve_unknown: AtomicBool::new(false),
             report_refused: AtomicBool::new(false),
@@ -419,6 +421,14 @@ impl Shared {
 
     pub fn writable(&self, call_id: u64, sent: bool) {
         let _ = self.events.send(Event::Writable { call_id, sent });
+    }
+
+    pub fn drain(&self) {
+        self.draining.send_replace(true);
+    }
+
+    pub fn draining(&self) -> watch::Receiver<bool> {
+        self.draining.subscribe()
     }
 
     pub fn close(&self) {

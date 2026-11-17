@@ -502,6 +502,45 @@ def test_stop_with_grace_finishes_running_calls(pb: tuple[Any, Any]) -> None:
         assert done.wait(5)
 
 
+def test_stopping_server_sends_new_calls_elsewhere(pb: tuple[Any, Any]) -> None:
+    t_pb2, t_pb2_grpc = pb
+    started, release = threading.Event(), threading.Event()
+
+    def slow(request: Any, context: grpc.ServicerContext) -> Any:
+        if request.s == "slow":
+            started.set()
+            release.wait(10)
+        return request
+
+    a, port_a = _serve(pb, "native", unary=slow)
+    b, port_b = _serve(pb, "native")
+    options = [
+        ("grpc.lb_policy_name", "round_robin"),
+        ("grpc.default_authority", "localhost"),
+    ]
+    target = f"ipv4:127.0.0.1:{port_a},127.0.0.1:{port_b}"
+    try:
+        with grpc.insecure_channel(target, options=options) as channel:
+            stub = t_pb2_grpc.SStub(channel)
+            for _ in range(10):
+                stub.Unary(t_pb2.Msg(s="x"), timeout=5)
+            with grpc.insecure_channel(f"127.0.0.1:{port_a}") as direct:
+                running = t_pb2_grpc.SStub(direct).Unary.future(
+                    t_pb2.Msg(s="slow"), timeout=10
+                )
+                assert started.wait(5)
+                done = a.stop(10)
+                for _ in range(50):
+                    assert stub.Unary(t_pb2.Msg(s="x"), timeout=5).s == "x"
+                release.set()
+                assert running.result().s == "slow"
+                assert done.wait(5)
+    finally:
+        release.set()
+        a.stop(None)
+        b.stop(None)
+
+
 def test_unsupported_features_are_rejected(pb: tuple[Any, Any]) -> None:
     pool = futures.ThreadPoolExecutor(1)
     with pytest.raises(ValueError, match="unsupported server option"):

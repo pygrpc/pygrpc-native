@@ -437,6 +437,7 @@ class Server(_Codec, _Methods, aio.Server):
         self._loop: asyncio.AbstractEventLoop | None = None
         self._started = False
         self._stopping = False
+        self._closing = False
         self._terminated = asyncio.Event()
         self._wake: int | None = None
         self._stopped = threading.Event()
@@ -528,15 +529,18 @@ class Server(_Codec, _Methods, aio.Server):
             await self._terminated.wait()
             return
         self._stopping = True
+        if self._front is not None:
+            self._front._drain()
         fallback = None
         if self._fallback is not None:
             fallback = asyncio.ensure_future(self._fallback.stop(grace))
-        tasks: list[asyncio.Task[Any]] = [
-            call.task for call in self._calls.values() if call.task is not None
-        ]
-        tasks += self._refused
-        if grace and tasks:
-            await asyncio.wait(tasks, timeout=grace)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + (grace or 0)
+        # Calls sent before the client saw GOAWAY still come in.
+        while (tasks := self._tasks()) and (left := deadline - loop.time()) > 0:
+            await asyncio.wait(tasks, timeout=left)
+        self._closing = True
+        tasks = self._tasks()
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -550,6 +554,10 @@ class Server(_Codec, _Methods, aio.Server):
         if self._fallback_dir is not None:
             shutil.rmtree(self._fallback_dir, ignore_errors=True)
         self._terminated.set()
+
+    def _tasks(self) -> list[asyncio.Task[Any]]:
+        tasks = [call.task for call in self._calls.values() if call.task is not None]
+        return tasks + list(self._refused)
 
     async def wait_for_termination(self, timeout: float | None = None) -> bool:
         try:
@@ -614,7 +622,7 @@ class Server(_Codec, _Methods, aio.Server):
                 self._refused.add(task)
                 task.add_done_callback(self._refused.discard)
                 continue
-            if self._stopping:
+            if self._closing:
                 front.fail(
                     call_id,
                     _code(grpc.StatusCode.UNAVAILABLE),
@@ -653,7 +661,7 @@ class Server(_Codec, _Methods, aio.Server):
                 await self._run_unary(call, context, request)
         except asyncio.CancelledError:
             # Only an RPC the handler cancelled itself still has a client.
-            if not call.cancelled and not self._stopping:
+            if not call.cancelled and not self._closing:
                 self._end(call, grpc.StatusCode.CANCELLED, "Cancelled")
         finally:
             self._calls.pop(call.call_id, None)

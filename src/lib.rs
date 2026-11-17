@@ -685,6 +685,13 @@ impl NativeGrpcFront {
         Ok(Some(result))
     }
 
+    /// Like the start of grpcio's stop(grace): stop listening and send GOAWAY,
+    /// so clients send new calls elsewhere. Calls in flight keep running.
+    #[pyo3(name = "_drain")]
+    fn drain(&self) {
+        self.shared.drain();
+    }
+
     /// Stop the server without waiting for calls in flight. Safe to call twice.
     ///
     /// Clients of calls still running get UNAVAILABLE, and ``recv_batch``

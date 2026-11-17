@@ -109,6 +109,8 @@ pub(crate) async fn serve_connection<IO>(
             stream.await;
         });
     };
+    let mut draining = shared.draining();
+    let mut going_away = false;
     let mut stopping = false;
     loop {
         tokio::select! {
@@ -121,6 +123,11 @@ pub(crate) async fn serve_connection<IO>(
                 None => return,
             },
             _ = &mut keepalive => break,
+            _ = stopped(&mut draining), if !going_away => {
+                // The client sends new calls elsewhere; those running finish.
+                connection.graceful_shutdown();
+                going_away = true;
+            }
             _ = stopped(&mut shutdown) => {
                 stopping = true;
                 break;
