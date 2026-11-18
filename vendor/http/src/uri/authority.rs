@@ -72,15 +72,29 @@ impl Authority {
     ///
     /// This will try to prevent a copy if the type passed is the type used
     /// internally, and will copy the data if it is not.
+    ///
+    /// Unlike the other constructors, this also takes any non-empty UTF-8
+    /// without control characters: h2 uses it for `:authority`, where
+    /// grpc-core can send anything.
     pub fn from_maybe_shared<T>(src: T) -> Result<Self, InvalidUri>
     where
         T: AsRef<[u8]> + 'static,
     {
         if_downcast_into!(T, Bytes, src, {
-            return Authority::from_shared(src);
+            return Authority::from_shared_lenient(src);
         });
 
-        Authority::try_from(src.as_ref())
+        Authority::from_shared_lenient(Bytes::copy_from_slice(src.as_ref()))
+    }
+
+    fn from_shared_lenient(src: Bytes) -> Result<Self, InvalidUri> {
+        Authority::from_shared(src.clone()).or_else(|err| match str::from_utf8(&src) {
+            Ok(s) if !s.is_empty() && !s.chars().any(char::is_control) => Ok(Authority {
+                // Safety: just checked that it's UTF-8.
+                data: unsafe { ByteStr::from_utf8_unchecked(src) },
+            }),
+            _ => Err(err),
+        })
     }
 
     // Note: this may return an *empty* Authority. You might want `parse_non_empty`.
@@ -432,18 +446,15 @@ fn host(auth: &str) -> &str {
         .next()
         .expect("split always has at least 1 item");
 
-    if host_port.as_bytes()[0] == b'[' {
-        let i = host_port
-            .find(']')
-            .expect("parsing should validate brackets");
-        // ..= ranges aren't available in 1.20, our minimum Rust version...
-        &host_port[0..i + 1]
-    } else {
-        host_port
-            .split(':')
-            .next()
-            .expect("split always has at least 1 item")
+    if host_port.starts_with('[') {
+        if let Some(i) = host_port.find(']') {
+            return &host_port[..=i];
+        }
     }
+    host_port
+        .split(':')
+        .next()
+        .expect("split always has at least 1 item")
 }
 
 // Precondition: f converts all of the bytes in the passed in B into the
@@ -735,6 +746,21 @@ mod tests {
 
         let err = Authority::from_shared(Bytes::from_static([0xc0u8].as_ref())).unwrap_err();
         assert_eq!(err.0, ErrorKind::InvalidUriChar);
+    }
+
+    #[test]
+    fn from_maybe_shared_is_lenient() {
+        for s in ["127.0.0.1:1,127.0.0.1:2", "a@", "[::1"] {
+            let authority = Authority::from_maybe_shared(Bytes::from(s)).unwrap();
+            assert_eq!(authority, s);
+            authority.host();
+            authority.port();
+            assert_eq!(Authority::from_maybe_shared(s.as_bytes().to_vec()).unwrap(), s);
+            assert!(s.parse::<Authority>().is_err());
+        }
+        for s in [&b""[..], b"a\nb", b"a\x7fb", b"\xc0"] {
+            assert!(Authority::from_maybe_shared(Bytes::from_static(s)).is_err());
+        }
     }
 
     #[test]

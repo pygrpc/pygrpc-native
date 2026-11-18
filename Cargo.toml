@@ -47,8 +47,8 @@ x509-parser = { version = "0.18", default-features = false }
 lto = "thin"
 codegen-units = 1
 
-# grpc-core sends a Unix socket path, percent-encoded, as :authority, which
-# http 1.5 rejects (hyperium/http#836). The copy allows valid escapes in the
-# host. Drop it once upstream does.
+# h2 resets a call whose :authority http can't parse, and grpc-core can send
+# one: a percent-encoded Unix socket path (hyperium/http#836) or the address
+# list of an ipv4: target. The copy lets these through. Drop it once h2 does.
 [patch.crates-io]
 http = { path = "vendor/http" }

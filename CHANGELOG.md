@@ -10,6 +10,10 @@ All notable changes are listed here. The project follows
 
 - `auth_context()` gives every call its own dict, as grpcio does, so a handler
   that mutates it no longer leaks the change into later calls. (#142)
+- Calls no longer fail with `INTERNAL` when `:authority` isn't a valid URI
+  authority, such as the address list grpcio sends for an `ipv4:` target with
+  more than one address. Empty values and ones with control characters are
+  still rejected. (#162)
 
 ## 0.8.0 (2026-11-04)
 
