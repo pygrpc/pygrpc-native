@@ -4,6 +4,13 @@ All notable changes are listed here. The project follows
 [semantic versioning](https://semver.org); see
 [Compatibility](README.md#compatibility) for what that covers.
 
+## Unreleased
+
+### Fixed
+
+- `auth_context()` gives every call its own dict, as grpcio does, so a handler
+  that mutates it no longer leaks the change into later calls. (#142)
+
 ## 0.8.0 (2026-11-04)
 
 ### Added
