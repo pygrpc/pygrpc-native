@@ -532,7 +532,6 @@ def test_stopping_server_sends_new_calls_elsewhere(pb: tuple[Any, Any]) -> None:
     b, port_b = _serve(pb, "native")
     options = [
         ("grpc.lb_policy_name", "round_robin"),
-        ("grpc.default_authority", "localhost"),
     ]
     target = f"ipv4:127.0.0.1:{port_a},127.0.0.1:{port_b}"
     try:
