@@ -81,7 +81,9 @@ def test_large_messages() -> None:
 
 
 @pytest.mark.parametrize(
-    "compression", [grpc.Compression.Gzip, grpc.Compression.Deflate]
+    "compression",
+    [grpc.Compression.Gzip, grpc.Compression.Deflate],
+    ids=["gzip", "deflate"],
 )
 def test_compressed_request(compression: grpc.Compression) -> None:
     with serving([("/t.S/Echo", False)], echo) as (front, _):
