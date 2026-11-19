@@ -39,7 +39,7 @@ socket2 = { version = "0.6", features = ["all"] }
 subtle = "2.6"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
-tonic = { version = "0.14", default-features = false, features = ["server", "gzip"] }
+tonic = { version = "0.14", default-features = false, features = ["server", "gzip", "deflate"] }
 x509-parser = { version = "0.18", default-features = false }
 
 # The per-call path crosses crates (hyper, h2, tonic); let them inline.

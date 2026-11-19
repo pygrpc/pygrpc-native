@@ -80,10 +80,13 @@ def test_large_messages() -> None:
             assert channel.unary_unary("/t.S/Echo")(payload, timeout=30) == payload
 
 
-def test_gzip_request() -> None:
+@pytest.mark.parametrize(
+    "compression", [grpc.Compression.Gzip, grpc.Compression.Deflate]
+)
+def test_compressed_request(compression: grpc.Compression) -> None:
     with serving([("/t.S/Echo", False)], echo) as (front, _):
         with grpc.insecure_channel(
-            f"127.0.0.1:{front.bound_port}", compression=grpc.Compression.Gzip
+            f"127.0.0.1:{front.bound_port}", compression=compression
         ) as channel:
             assert channel.unary_unary("/t.S/Echo")(b"z" * 4096, timeout=5) == (
                 b"z" * 4096
