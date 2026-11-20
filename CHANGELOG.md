@@ -14,6 +14,8 @@ All notable changes are listed here. The project follows
   authority, such as the address list grpcio sends for an `ipv4:` target with
   more than one address. Empty values and ones with control characters are
   still rejected. (#162)
+- Requests compressed with deflate are served instead of failing with
+  `UNIMPLEMENTED`, as grpcio does. (#163)
 
 ## 0.8.0 (2026-11-04)
 

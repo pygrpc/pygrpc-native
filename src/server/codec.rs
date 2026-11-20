@@ -56,9 +56,10 @@ impl Decoder for BytesCodec {
 }
 
 pub(super) fn grpc(sizes: Option<Arc<CallSizes>>) -> Grpc<BytesCodec> {
-    // Like grpcio servers: take gzip requests, but answer uncompressed.
+    // Like grpcio servers: take compressed requests, but answer uncompressed.
     Grpc::new(BytesCodec { sizes })
         .accept_compressed(CompressionEncoding::Gzip)
+        .accept_compressed(CompressionEncoding::Deflate)
         .max_decoding_message_size(usize::MAX)
         .max_encoding_message_size(usize::MAX)
 }
