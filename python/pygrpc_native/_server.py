@@ -98,9 +98,8 @@ def _limit(value: int) -> int | None:
 
 def _parse_options(
     options: Iterable[tuple[str, Any]] | None,
-) -> tuple[int | None, int | None, dict[str, Any]]:
-    """Returns the receive and send limits and the arguments for
-    NativeGrpcFront."""
+) -> tuple[int | None, dict[str, Any]]:
+    """Returns the send limit and the arguments for NativeGrpcFront."""
     receive: int | None = _DEFAULT_RECEIVE_LIMIT
     send: int | None = None
     soft_metadata = hard_metadata = -1
@@ -142,10 +141,8 @@ def _parse_options(
         if hard_metadata < 0:
             hard_metadata = max(int(soft_metadata * 1.25), _DEFAULT_METADATA_LIMIT)
         front["max_metadata_size"] = min(hard_metadata, 2**32 - 1)
-    # The front refuses a message from its length prefix; _request() also
-    # checks a compressed one once it is decompressed.
     front["max_receive_message_length"] = receive
-    return receive, send, front
+    return send, front
 
 
 def _split_handlers(
@@ -586,19 +583,11 @@ class _Codec:
     """Request decoding and response encoding with grpcio's limits and errors."""
 
     _front: NativeGrpcFront | None
-    _receive_limit: int | None
     _send_limit: int | None
 
     def _request(self, call: Any, payload: bytes) -> tuple[bool, Any]:
         front = self._front
         assert front is not None
-        if self._receive_limit is not None and len(payload) > self._receive_limit:
-            front.fail(
-                call.call_id,
-                _code(grpc.StatusCode.RESOURCE_EXHAUSTED),
-                f"SERVER: Received message larger than max ({len(payload)} vs. {self._receive_limit})",
-            )
-            return False, None
         deserializer = call.handler.request_deserializer
         try:
             return True, payload if deserializer is None else deserializer(payload)
@@ -661,9 +650,7 @@ class Server(_Codec, _Methods, grpc.Server):
             raise NotImplementedError("response compression isn't supported")
         self._limit = _ConcurrencyLimit(maximum_concurrent_rpcs)
         self._options = list(options or ())
-        self._receive_limit, self._send_limit, self._front_args = _parse_options(
-            self._options
-        )
+        self._send_limit, self._front_args = _parse_options(self._options)
         self._executor = thread_pool
         self._interceptors = tuple(interceptors or ())
         self._io_threads = io_threads

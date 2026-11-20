@@ -134,10 +134,11 @@ type TlsArgs = (Vec<u8>, Vec<u8>, Option<Vec<u8>>, bool);
 ///         last. ``root_certificates`` may be None unless client certificates
 ///         are required. None serves plaintext.
 ///     max_receive_message_length: The largest request message a native
-///         method takes, in bytes, as sent (compressed or not). A call with
-///         a larger message ends with RESOURCE_EXHAUSTED as soon as its
-///         length prefix arrives, without reading the rest of it. Calls to
-///         the fallback aren't checked. None (the default) has no limit.
+///         method takes, in bytes. A call with a larger message ends with
+///         RESOURCE_EXHAUSTED as soon as its length prefix arrives, without
+///         reading the rest of it, and a compressed one also as soon as it
+///         decompresses past the limit. Calls to the fallback aren't
+///         checked. None (the default) has no limit.
 ///
 /// Raises:
 ///     OSError: If the address cannot be bound.

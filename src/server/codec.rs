@@ -55,11 +55,13 @@ impl Decoder for BytesCodec {
     }
 }
 
-pub(super) fn grpc(sizes: Option<Arc<CallSizes>>) -> Grpc<BytesCodec> {
+pub(super) fn grpc(sizes: Option<Arc<CallSizes>>, max_receive: Option<usize>) -> Grpc<BytesCodec> {
     // Like grpcio servers: take compressed requests, but answer uncompressed.
     Grpc::new(BytesCodec { sizes })
         .accept_compressed(CompressionEncoding::Gzip)
         .accept_compressed(CompressionEncoding::Deflate)
-        .max_decoding_message_size(usize::MAX)
+        // Stops decompressing at the limit. Uncompressed messages over it
+        // never get here: RequestBody refuses them from their length prefix.
+        .max_decoding_message_size(max_receive.unwrap_or(usize::MAX))
         .max_encoding_message_size(usize::MAX)
 }

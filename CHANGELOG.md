@@ -16,6 +16,11 @@ All notable changes are listed here. The project follows
   still rejected. (#162)
 - Requests compressed with deflate are served instead of failing with
   `UNIMPLEMENTED`, as grpcio does. (#163)
+- A compressed request is refused as soon as it decompresses past
+  `max_receive_message_length`, as grpcio does, instead of after it has been
+  decompressed in full. The error is grpcio's `Decompressed message larger
+  than max`. `NativeGrpcFront` used to check only the compressed size and hand
+  such a message to Python. (#164)
 
 ## 0.8.0 (2026-11-04)
 

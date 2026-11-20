@@ -88,8 +88,10 @@ async fn route(
     if let Some(call) = call {
         call.start(Some(method_id));
     }
+    let max_receive = shared.connection.max_receive_message_length;
+    let compressed = max_receive.is_some() && request.headers().contains_key("grpc-encoding");
     let mut refusal = None;
-    if let Some(max) = shared.connection.max_receive_message_length {
+    if let Some(max) = max_receive {
         let mut limit = MessageLimit::new(max);
         if shared.report_refused.load(Ordering::Relaxed) {
             let refused = Arc::new(AtomicBool::new(false));
@@ -114,7 +116,9 @@ async fn route(
                 peer,
                 deadline,
             };
-            grpc(sizes).server_streaming(call, request).await
+            grpc(sizes, max_receive)
+                .server_streaming(call, request)
+                .await
         } else {
             let call = UnaryCall {
                 shared,
@@ -122,19 +126,36 @@ async fn route(
                 peer,
                 deadline,
             };
-            with_extra_trailers(grpc(sizes).unary(call, request).await)
+            with_extra_trailers(grpc(sizes, max_receive).unary(call, request).await)
         }
     };
-    let response = match deadline {
+    let mut response = match deadline {
         Some(deadline) => tokio::time::timeout_at(deadline, response)
             .await
             .unwrap_or_else(|_| deadline_exceeded().into_http()),
         None => response.await,
     };
+    if compressed && decompressed_too_large(&response) {
+        let _ = Status::resource_exhausted("Decompressed message larger than max")
+            .add_header(response.headers_mut());
+        if let Some(refusal) = &refusal {
+            refusal.refused.store(true, Ordering::Relaxed);
+        }
+    }
     if let Some(refusal) = refusal {
         refusal.report();
     }
     response
+}
+
+/// tonic's error for a message that decompresses past the receive limit.
+fn decompressed_too_large(response: &http::Response<tonic::body::Body>) -> bool {
+    Status::from_header_map(response.headers()).is_some_and(|status| {
+        status.code() == Code::ResourceExhausted
+            && status
+                .message()
+                .starts_with("Error decompressing: size limit")
+    })
 }
 
 /// What `server()` needs to run its interceptors for a call refused for its
