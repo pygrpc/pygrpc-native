@@ -237,6 +237,12 @@ def test_message_over_the_receive_limit_never_reaches_python() -> None:
             with pytest.raises(grpc.RpcError) as info:
                 call(compressible, timeout=5, compression=grpc.Compression.Gzip)
             assert _code(info.value) is grpc.StatusCode.RESOURCE_EXHAUSTED
+            # Under the limit compressed, over it decompressed.
+            with pytest.raises(grpc.RpcError) as info:
+                call(bytes(100_000), timeout=5, compression=grpc.Compression.Gzip)
+            error = cast(grpc.Call, info.value)
+            assert error.code() is grpc.StatusCode.RESOURCE_EXHAUSTED
+            assert error.details() == "Decompressed message larger than max"
     finally:
         front.close()
     assert seen == [1024]

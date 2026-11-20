@@ -266,6 +266,16 @@ def test_message_limits_match_grpcio(pb: tuple[Any, Any]) -> None:
     assert _unary(pb, "native", echo, "x" * 20, options=options) == _unary(
         pb, "grpcio", echo, "x" * 20, options=options
     )
+    # Not compared with grpcio: older versions, such as 1.64, decompress it in
+    # full and report its size instead.
+    options = [("grpc.max_receive_message_length", 1024)]
+    gzip = [("grpc.default_compression_algorithm", 2)]
+    assert _unary(
+        pb, "native", echo, "x" * 100_000, channel_options=gzip, options=options
+    )[:2] == (
+        grpc.StatusCode.RESOURCE_EXHAUSTED,
+        "Decompressed message larger than max",
+    )
     big = "x" * (4 * 1024 * 1024 + 1)
     assert (
         _unary(pb, "native", echo, big)[0]
@@ -290,19 +300,24 @@ def test_interceptors_see_a_call_refused_for_its_size(
             seen.append(details.method)
             return continuation(details)
 
-    outcome = _unary(
-        pb,
-        kind,
-        UNARY_CASES["echo"],
-        "x" * 2000,
-        options=[("grpc.max_receive_message_length", 1024)],
-        interceptors=[Record()],
-    )
-    assert outcome[0] == grpc.StatusCode.RESOURCE_EXHAUSTED
-    deadline = time.monotonic() + 5
-    while not seen and time.monotonic() < deadline:
-        time.sleep(0.01)
-    assert seen == ["/t.S/Unary"]
+    gzip = [("grpc.default_compression_algorithm", 2)]
+    # Over the limit as sent, then only once decompressed.
+    for request, channel_options in (("x" * 2000, None), ("x" * 100_000, gzip)):
+        seen.clear()
+        outcome = _unary(
+            pb,
+            kind,
+            UNARY_CASES["echo"],
+            request,
+            channel_options=channel_options,
+            options=[("grpc.max_receive_message_length", 1024)],
+            interceptors=[Record()],
+        )
+        assert outcome[0] == grpc.StatusCode.RESOURCE_EXHAUSTED
+        deadline = time.monotonic() + 5
+        while not seen and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert seen == ["/t.S/Unary"]
 
 
 def test_context_details(pb: tuple[Any, Any], kind: str) -> None:

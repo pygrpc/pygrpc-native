@@ -413,9 +413,7 @@ class Server(_Codec, _Methods, aio.Server):
             raise NotImplementedError("response compression isn't supported")
         self._limit = _ConcurrencyLimit(maximum_concurrent_rpcs)
         self._options = list(options or ())
-        self._receive_limit, self._send_limit, self._front_args = _parse_options(
-            self._options
-        )
+        self._send_limit, self._front_args = _parse_options(self._options)
         self._executor = migration_thread_pool
         self._interceptors = tuple(interceptors or ())
         self._io_threads = io_threads

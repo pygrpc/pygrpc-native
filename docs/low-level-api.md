@@ -48,8 +48,8 @@ before `start()`, so the port can be bound before the methods are known.
 Request messages have no size limit unless you set
 `max_receive_message_length`. A call whose message is larger, as sent, then
 ends with `RESOURCE_EXHAUSTED` as soon as its length prefix arrives, and the
-rest of the message isn't read. `server()` and `aio.server()` also check a
-compressed message once it is decompressed, as grpcio does.
+rest of the message isn't read. A compressed message is also refused as soon
+as it decompresses past the limit, as grpcio does.
 
 | Member | Purpose |
 |---|---|
