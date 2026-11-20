@@ -4,10 +4,31 @@ All notable changes are listed here. The project follows
 [semantic versioning](https://semver.org); see
 [Compatibility](README.md#compatibility) for what that covers.
 
-## Unreleased
+## 0.8.1 (2026-11-20)
+
+### Added
+
+- `NativeGrpcFront` takes `max_receive_message_length`. A call whose message is
+  larger ends with `RESOURCE_EXHAUSTED` as soon as its length prefix arrives.
+  There's no limit by default. (#160)
 
 ### Fixed
 
+- A handler that set details or trailing metadata the server can't send no
+  longer leaves the call open until its deadline; the call ends with
+  `INTERNAL`. `server()` also takes bytes in `set_details()` and `abort()` and
+  `None` in `set_trailing_metadata()`, as `grpc.server()` does. (#145)
+- `respond()`, `fail()`, `stream_send_initial_metadata()` and `stream_end()`
+  end the call with `INTERNAL` when they can't use an argument, instead of
+  raising and leaving it open. (#158)
+- `server()` skips the handler of a call whose client left while it waited
+  for a worker, as `grpc.server()` does. (#159)
+- `server()` and `aio.server()` refuse a message over
+  `max_receive_message_length` as soon as its length prefix arrives, as grpcio
+  does, instead of after reading all of it. (#160)
+- `stop(grace)` closes the listeners and sends GOAWAY right away, as grpcio
+  does, so clients move new calls to other servers instead of getting
+  `UNAVAILABLE` during the grace period. (#161)
 - `auth_context()` gives every call its own dict, as grpcio does, so a handler
   that mutates it no longer leaks the change into later calls. (#142)
 - Calls no longer fail with `INTERNAL` when `:authority` isn't a valid URI
