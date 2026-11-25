@@ -4,6 +4,14 @@ All notable changes are listed here. The project follows
 [semantic versioning](https://semver.org); see
 [Compatibility](README.md#compatibility) for what that covers.
 
+## Unreleased
+
+### Fixed
+
+- TCP listeners use a backlog of 4096 (capped by `net.core.somaxconn`) instead
+  of 128, so a burst of new connections no longer waits for SYN retransmits.
+  (#168)
+
 ## 0.8.1 (2026-11-20)
 
 ### Added
