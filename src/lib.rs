@@ -1016,24 +1016,25 @@ fn bind(target: &str, reuse_port: bool) -> std::io::Result<BoundSockets> {
     })
 }
 
-// std's backlog.
-const LISTEN_BACKLOG: i32 = 128;
+// std listens with 128, which drops SYNs when many clients connect at once.
+// The kernel caps this at net.core.somaxconn, as with grpc-core's SOMAXCONN.
+const LISTEN_BACKLOG: i32 = 4096;
 
 fn bind_tcp(
     addr: std::net::SocketAddr,
     reuse_port: bool,
 ) -> std::io::Result<std::net::TcpListener> {
-    if !reuse_port {
-        return std::net::TcpListener::bind(addr);
-    }
-    // SO_REUSEPORT has to be set before bind, which std doesn't allow.
+    // std can't set the backlog or SO_REUSEPORT, so bind with socket2.
     let socket = socket2::Socket::new(
         socket2::Domain::for_address(addr),
         socket2::Type::STREAM,
         Some(socket2::Protocol::TCP),
     )?;
+    // std sets SO_REUSEADDR on Unix too.
     socket.set_reuse_address(true)?;
-    socket.set_reuse_port(true)?;
+    if reuse_port {
+        socket.set_reuse_port(true)?;
+    }
     socket.bind(&addr.into())?;
     socket.listen(LISTEN_BACKLOG)?;
     Ok(socket.into())
@@ -1056,4 +1057,24 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("STREAM_CLOSED", STREAM_CLOSED)?;
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn listener_queues_more_than_std_backlog() {
+        // Nothing accepts, so connects past the backlog would time out.
+        for reuse_port in [false, true] {
+            let listener = bind_tcp("127.0.0.1:0".parse().unwrap(), reuse_port).unwrap();
+            let addr = listener.local_addr().unwrap();
+            let _clients: Vec<_> = (0..200)
+                .map(|_| {
+                    std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(500)).unwrap()
+                })
+                .collect();
+        }
+    }
 }
