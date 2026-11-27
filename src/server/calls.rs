@@ -16,7 +16,7 @@ use tonic::server::{ServerStreamingService, UnaryService};
 use tonic::Status;
 
 use super::order::turn;
-use super::{CallDetails, ClientKey, Event, MetadataValue, Peer, Shared};
+use super::{CallDetails, ClientKey, Event, MetadataValue, Payload, Peer, Shared};
 
 // Bytes a stream queues before the writer waits; a larger message goes alone.
 const STREAM_BUDGET: usize = 256 * 1024;
@@ -226,11 +226,19 @@ pub(super) struct UnaryCall {
     pub(super) deadline: Option<tokio::time::Instant>,
 }
 
+type UnaryFuture = Pin<Box<dyn Future<Output = Result<tonic::Response<Bytes>, Status>> + Send>>;
+
 impl UnaryService<Bytes> for UnaryCall {
     type Response = Bytes;
-    type Future = Pin<Box<dyn Future<Output = Result<tonic::Response<Bytes>, Status>> + Send>>;
+    type Future = UnaryFuture;
 
     fn call(&mut self, request: tonic::Request<Bytes>) -> Self::Future {
+        self.start(request.map(Payload::One))
+    }
+}
+
+impl UnaryCall {
+    pub(super) fn start(&mut self, request: tonic::Request<Payload>) -> UnaryFuture {
         let shared = self.shared.clone();
         let method_id = self.method_id;
         let client_key = client_key(
@@ -356,13 +364,21 @@ pub(super) struct StreamingCall {
     pub(super) deadline: Option<tokio::time::Instant>,
 }
 
+type StreamingFuture =
+    Pin<Box<dyn Future<Output = Result<tonic::Response<ResponseStream>, Status>> + Send>>;
+
 impl ServerStreamingService<Bytes> for StreamingCall {
     type Response = Bytes;
     type ResponseStream = ResponseStream;
-    type Future =
-        Pin<Box<dyn Future<Output = Result<tonic::Response<ResponseStream>, Status>> + Send>>;
+    type Future = StreamingFuture;
 
     fn call(&mut self, request: tonic::Request<Bytes>) -> Self::Future {
+        self.start(request.map(Payload::One))
+    }
+}
+
+impl StreamingCall {
+    pub(super) fn start(&mut self, request: tonic::Request<Payload>) -> StreamingFuture {
         let shared = self.shared.clone();
         let method_id = self.method_id;
         let client_key = client_key(

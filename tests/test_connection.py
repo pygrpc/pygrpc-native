@@ -1,6 +1,7 @@
 """HTTP/2 connection settings: keepalive pings, stream and frame limits, and
 the server options grpcio takes for them."""
 
+import os
 import socket
 import struct
 import time
@@ -12,7 +13,7 @@ import grpc
 import pytest
 
 import pygrpc_native
-from pygrpc_native import NativeGrpcFront
+from pygrpc_native import EVENT_CALL, NativeGrpcFront
 
 PREFACE = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
 SETTINGS, PING, GOAWAY = 0x4, 0x6, 0x7
@@ -110,6 +111,34 @@ def _front(**kwargs: Any) -> NativeGrpcFront:
     front = NativeGrpcFront("127.0.0.1:0", [("/t.S/U", False)], **kwargs)
     front.start()
     return front
+
+
+@pytest.mark.parametrize(
+    ("after", "delivered"),
+    [(b"\x00\x00\x00\x00\x00", True), (b"\x02\x00\x00\x00\x00", False)],
+    ids=["empty-message", "bad-flag"],
+)
+def test_unary_request_split_across_frames(after: bytes, delivered: bool) -> None:
+    # The first message's header spans frames, much of its body comes a byte
+    # at a time, and the last frame carries the start of another message,
+    # which is read and dropped, or fails the call when it is malformed.
+    message = os.urandom(1000)
+    body = b"\x00" + struct.pack(">I", len(message)) + message + after
+    front = _front()
+    peer = Peer(front.bound_port)
+    try:
+        peer.sock.sendall(
+            _start_call("/t.S/U")
+            + _frame(0x0, 0, 1, body[:2])
+            + b"".join(_frame(0x0, 0, 1, body[i : i + 1]) for i in range(2, 600))
+            + _frame(0x0, 0x1, 1, body[600:])
+        )
+        events = front.recv_batch(8, 1000)
+    finally:
+        peer.close()
+        front.close()
+    calls = [payload for kind, _, _, payload, _ in events or [] if kind == EVENT_CALL]
+    assert calls == ([message] if delivered else [])
 
 
 def test_unanswered_pings_close_the_connection() -> None:

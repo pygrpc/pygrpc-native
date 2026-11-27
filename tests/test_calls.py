@@ -107,6 +107,20 @@ def test_server_streaming() -> None:
     assert replies == [bytes([i]) for i in range(5)]
 
 
+def test_server_streaming_mixed_sizes() -> None:
+    messages = [os.urandom(n) for n in (10, 100_000, 20, 30, 1 << 20, 5)]
+
+    def send(front: NativeGrpcFront, call_id: int, *_: object) -> None:
+        for message in messages:
+            assert front.stream_send(call_id, message)
+        front.stream_end(call_id)
+
+    with serving([("/t.S/Mixed", True)], send) as (front, _):
+        with grpc.insecure_channel(f"127.0.0.1:{front.bound_port}") as channel:
+            replies = list(channel.unary_stream("/t.S/Mixed")(b"", timeout=5))
+    assert replies == messages
+
+
 def test_fail_sets_status() -> None:
     def reject(front: NativeGrpcFront, call_id: int, *_: object) -> None:
         front.fail(call_id, grpc.StatusCode.INVALID_ARGUMENT.value[0], "bad input")
