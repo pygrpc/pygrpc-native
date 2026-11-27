@@ -8,6 +8,7 @@ mod auth;
 mod calls;
 mod codec;
 mod connection;
+mod direct;
 mod fallback;
 mod listener;
 mod order;
@@ -95,11 +96,17 @@ pub struct CallDetails {
     pub deadline: Option<tokio::time::Instant>,
 }
 
+/// A request message: one buffer, or the DATA frames it arrived in and its length.
+pub enum Payload {
+    One(Bytes),
+    Frames(Vec<Bytes>, usize),
+}
+
 pub enum Event {
     Call {
         call_id: u64,
         method_id: u32,
-        payload: Bytes,
+        payload: Payload,
         client_key: ClientKey,
         details: Option<Box<CallDetails>>,
     },

@@ -19,6 +19,7 @@ use super::calls::{
     UnaryCall,
 };
 use super::codec::grpc;
+use super::direct;
 use super::fallback::Fallback;
 use super::order::Turn;
 use super::{Event, NativeMethod, Peer, Resolved, Shared, GRPC_HEADER_LEN};
@@ -109,6 +110,7 @@ async fn route(
     }
     let sizes = call.map(|call| call.sizes.clone());
     let response = async {
+        let direct = direct::handles(request.headers());
         if streaming {
             let call = StreamingCall {
                 shared,
@@ -116,6 +118,9 @@ async fn route(
                 peer,
                 deadline,
             };
+            if direct {
+                return direct::server_streaming(call, request, sizes).await;
+            }
             grpc(sizes, max_receive)
                 .server_streaming(call, request)
                 .await
@@ -126,6 +131,9 @@ async fn route(
                 peer,
                 deadline,
             };
+            if direct {
+                return direct::unary(call, request, sizes).await;
+            }
             with_extra_trailers(grpc(sizes, max_receive).unary(call, request).await)
         }
     };

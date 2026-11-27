@@ -33,7 +33,7 @@ use tonic::{Code, Status};
 
 use server::{
     accept_loop, AddMethodsError, Answer, BearerAuth, CallDetails, ClientKey, ConnectionSettings,
-    Event, Keepalive, Listener, MetadataValue, Shared, CALL_DRAIN_TIMEOUT,
+    Event, Keepalive, Listener, MetadataValue, Payload, Shared, CALL_DRAIN_TIMEOUT,
     CONNECTION_DRAIN_TIMEOUT, MAX_RESOLVED,
 };
 
@@ -862,7 +862,7 @@ fn event_tuple<'py>(py: Python<'py>, event: Event) -> PyResult<Bound<'py, PyTupl
                 EVENT_CALL,
                 call_id,
                 method_id,
-                PyBytes::new(py, &payload),
+                payload_bytes(py, &payload)?,
                 key,
             )
                 .into_pyobject(py)
@@ -880,6 +880,28 @@ fn event_tuple<'py>(py: Python<'py>, event: Event) -> PyResult<Bound<'py, PyTupl
             (EVENT_WRITABLE, call_id, 0u32, sent, py.None()).into_pyobject(py)
         }
         Event::Closed => Err(PyRuntimeError::new_err("unexpected close event")),
+    }
+}
+
+fn payload_bytes<'py>(py: Python<'py>, payload: &Payload) -> PyResult<Bound<'py, PyBytes>> {
+    let (frames, len) = match payload {
+        Payload::One(bytes) => return Ok(PyBytes::new(py, bytes)),
+        Payload::Frames(frames, len) => (frames, *len),
+    };
+    debug_assert_eq!(frames.iter().map(Bytes::len).sum::<usize>(), len);
+    // PyBytes::new_with zeroes the buffer first, which costs throughput
+    // while the GIL is held. SAFETY: the bytes object is new and unshared,
+    // and the frames fill exactly its `len` bytes.
+    unsafe {
+        let ptr =
+            pyo3::ffi::PyBytes_FromStringAndSize(std::ptr::null(), len as pyo3::ffi::Py_ssize_t);
+        let bytes = Bound::from_owned_ptr_or_err(py, ptr)?.cast_into_unchecked::<PyBytes>();
+        let mut at = pyo3::ffi::PyBytes_AsString(ptr) as *mut u8;
+        for frame in frames {
+            std::ptr::copy_nonoverlapping(frame.as_ptr(), at, frame.len());
+            at = at.add(frame.len());
+        }
+        Ok(bytes)
     }
 }
 
